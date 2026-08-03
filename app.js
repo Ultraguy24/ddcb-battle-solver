@@ -72,8 +72,9 @@ function parseNegateTag(xt){
 function isFirstStrikeXTag(xt){ return /^1st attack$/i.test((xt||"").trim()); }
 function baseVal(card, atk){ return atk==='o'?card.o: atk==='t'?card.t: card.x; }
 
-function effectiveDamage(attacker, atkKey, defender){
-  let val = baseVal(attacker, atkKey);
+function effectiveDamage(attacker, atkKey, defender, valueKey){
+  const vk = valueKey || atkKey;
+  let val = baseVal(attacker, vk);
   if(atkKey==='x'){
     const fm = parseFoeMultiplier(attacker.xt);
     if(fm && defender.sp === fm.spec) val = val * fm.mult;
@@ -125,6 +126,12 @@ function parseEffectTags(text){
     const locked = ['o','t','x'].find(a=>!mentioned.includes(a));
     if(locked) tags.push({type:'lockOwnAttack', attack:locked});
   }
+  if(/Opponent'?s attack changes/i.test(text)){
+    // Confirmed by play: this swaps only which damage NUMBER is used, not which
+    // button was pressed -- own X/T/O-triggered abilities still key off the
+    // original chosen attack, not the redirected one. (Disrupt Ray: O->T, T->X, X->O)
+    tags.push({type:'redirectOtherAttackValue', map:{o:'t', t:'x', x:'o'}});
+  }
   return tags;
 }
 
@@ -138,8 +145,15 @@ function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSuppo
   mySupportTags.forEach(tag=>{ if(tag.type==='lockOwnAttack'){ a = tag.attack; } });
   oppSupportTags.forEach(tag=>{ if(tag.type==='lockOwnAttack'){ b = tag.attack; } });
 
-  let myDmg = effectiveDamage(myCard, a, oppCard);
-  let oppDmg = effectiveDamage(oppCard, b, myCard);
+  // Value-only redirects (e.g. Disrupt Ray): change which damage NUMBER is used
+  // without changing which attack was actually "pressed" -- own-attack-triggered
+  // abilities (negation, foe multipliers, first strike) still key off a/b as-is.
+  let aVal = a, bVal = b;
+  mySupportTags.forEach(tag=>{ if(tag.type==='redirectOtherAttackValue'){ bVal = tag.map[b]; } });
+  oppSupportTags.forEach(tag=>{ if(tag.type==='redirectOtherAttackValue'){ aVal = tag.map[a]; } });
+
+  let myDmg = effectiveDamage(myCard, a, oppCard, aVal);
+  let oppDmg = effectiveDamage(oppCard, b, myCard, bVal);
 
   mySupportTags.forEach(tag=>{
     if(tag.type==='boostOwnAttack') myDmg += tag.amount;
