@@ -118,6 +118,13 @@ function parseEffectTags(text){
     const mm = /Forces? both players? (?:to use|to choose)\s*(O|T|X|Circle|Triangle|Cross)/i.exec(text) || /Both players use\s*(O|T|X)/i.exec(text);
     tags.push({type:'forceBothAttack', attack:wordToAtk(mm[1])});
   }
+  if(m = /Own attack becomes\s*(O|T|X|Circle|Triangle|Cross)/i.exec(text)){
+    tags.push({type:'lockOwnAttack', attack:wordToAtk(m[1])});
+  } else if(m = /(O|T|X)\s+and\s+(O|T|X)\s+[Aa]ttack power (?:are|is|becomes) 0/i.exec(text)){
+    const mentioned = [wordToAtk(m[1]), wordToAtk(m[2])];
+    const locked = ['o','t','x'].find(a=>!mentioned.includes(a));
+    if(locked) tags.push({type:'lockOwnAttack', attack:locked});
+  }
   return tags;
 }
 
@@ -128,6 +135,8 @@ function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSuppo
   mySupportTags.concat(oppSupportTags).forEach(tag=>{
     if(tag.type==='forceBothAttack'){ a = tag.attack; b = tag.attack; }
   });
+  mySupportTags.forEach(tag=>{ if(tag.type==='lockOwnAttack'){ a = tag.attack; } });
+  oppSupportTags.forEach(tag=>{ if(tag.type==='lockOwnAttack'){ b = tag.attack; } });
 
   let myDmg = effectiveDamage(myCard, a, oppCard);
   let oppDmg = effectiveDamage(oppCard, b, myCard);
@@ -625,8 +634,9 @@ function renderDpPhase(el){
     wireSearchBox('oppEvoInput', {type:'digimon'}, (card)=>{
       B.oppActive = Object.assign({}, card); B.oppHp = card.hp;
       removeFromOppHand(card.id);
+      B.oppDpTotal = 0;
       document.getElementById('oppEvoInput').value = card.name;
-      logEvent(`Opponent digivolved to ${card.name}.`);
+      logEvent(`Opponent digivolved to ${card.name} (DP counter spent, reset to 0).`);
     });
   }
 }
@@ -671,6 +681,7 @@ function renderAttackPhase(el){
       <div class="small-note">It's your turn, so the opponent (non-turn player) commits their support first. Pick what they played from their tracked hand (or leave as none). This can be a tell for their attack.</div>
       <select id="oppSupportRevealSelect">
         <option value="">— none —</option>
+        <option value="__random__">— unknown / random card from their deck —</option>
         ${B.oppHand.map(c=>`<option value="${c._uid}">${c.name}${c.type==='option'?' (option)':''}</option>`).join('')}
       </select>
       <div class="small-note" style="margin-top:8px">Not in their tracked hand? Enter manually:</div>
@@ -697,6 +708,10 @@ function renderAttackPhase(el){
           <span class="val">${r.worst>=0?'+':''}${r.worst}</span>
           <button class="btn small secondary" onclick="App.pickMySupport('${r.id}')">USE</button>
         </div>`).join('')}
+      <div class="suggestion-rank">
+        <span>Play a random card from my deck<br><span class="small-note">Unknown effect — can't be scored, this is a genuine gamble.</span></span>
+        <button class="btn small secondary" onclick="App.pickMySupport('__random__')">USE</button>
+      </div>
     `;
     return;
   }
@@ -713,6 +728,10 @@ function renderAttackPhase(el){
             <span class="val">${r.worst>=0?'+':''}${r.worst}</span>
             <button class="btn small secondary" onclick="App.pickMySupport('${r.id}')">USE</button>
           </div>`).join('')}
+        <div class="suggestion-rank">
+          <span>Play a random card from my deck<br><span class="small-note">Unknown effect — can't be scored, this is a genuine gamble.</span></span>
+          <button class="btn small secondary" onclick="App.pickMySupport('__random__')">USE</button>
+        </div>
       </div>
       ${B.oppHand.length===0 ? '<div class="warn-box">Opponent\u2019s tracked hand is empty — if that\u2019s not actually true, add their cards in the panel above before trusting this ranking.</div>' : ''}
     `;
@@ -722,9 +741,10 @@ function renderAttackPhase(el){
   if(B.atkStep==='awaitOppSupportInfo'){
     el.innerHTML = `
       <h2>▸ OPPONENT REACTS</h2>
-      <div class="small-note">You committed ${B.mySupportChoiceId ? (findInHand(B.myHand, B.mySupportChoiceId)||{}).name : 'no support'}. The opponent (turn player) now sees that and picks their support. What did they play?</div>
+      <div class="small-note">You committed ${B.mySupportChoiceId==='__random__' ? 'a random card from your deck' : (B.mySupportChoiceId ? (findInHand(B.myHand, B.mySupportChoiceId)||{}).name : 'no support')}. The opponent (turn player) now sees that and picks their support. What did they play?</div>
       <select id="oppSupportRevealSelect2">
         <option value="">— none —</option>
+        <option value="__random__">— unknown / random card from their deck —</option>
         ${B.oppHand.map(c=>`<option value="${c._uid}">${c.name}${c.type==='option'?' (option)':''}</option>`).join('')}
       </select>
       <div class="small-note" style="margin-top:8px">Not in their tracked hand? Enter manually:</div>
@@ -786,6 +806,7 @@ const App = {
       B.myActive = picked.adjusted; B.myHp = picked.adjusted.hp;
       logEvent(`You enter with ${picked.adjusted.name}${(picked.raw.lvl==='C'||picked.raw.lvl==='U')?' (halved on entry)':''}.`);
     } else {
+      removeFromOppHand(picked.raw._uid||picked.raw.id);
       B.oppActive = picked.adjusted; B.oppHp = picked.adjusted.hp;
       logEvent(`Opponent enters with ${picked.adjusted.name}.`);
     }
@@ -835,7 +856,8 @@ const App = {
     removeFromOppHand(card._uid||card.id);
     B.oppActive = Object.assign({}, card);
     B.oppHp = card.hp;
-    logEvent(`Opponent digivolved to ${card.name}.`);
+    B.oppDpTotal = 0;
+    logEvent(`Opponent digivolved to ${card.name} (DP counter spent, reset to 0).`);
     renderAll();
   },
 
@@ -845,7 +867,8 @@ const App = {
     removeFromHand(card._uid||card.id);
     B.myActive = Object.assign({}, card);
     B.myHp = card.hp;
-    logEvent(`You digivolved to ${card.name}.`);
+    B.myDpTotal = 0;
+    logEvent(`You digivolved to ${card.name} (DP counter spent, reset to 0).`);
     renderAll();
   },
 
@@ -872,10 +895,14 @@ const App = {
   confirmOppSupportReveal(){
     const selectId = document.getElementById('oppSupportRevealSelect') ? document.getElementById('oppSupportRevealSelect').value : '';
     let card = null;
-    if(selectId) card = findInHand(B.oppHand, selectId) || null;
+    if(selectId==='__random__'){ card = {name:'(unknown/random card)', type:'unknown', note:'', effect:''}; }
+    else if(selectId) card = findInHand(B.oppHand, selectId) || null;
     else if(App._pendingOppSupportCard) card = App._pendingOppSupportCard;
     B.oppSupportRevealed = card;
-    if(card){ logEvent(`Opponent's support: ${card.name}.`); removeFromOppHand(card._uid||card.id); }
+    if(card){
+      logEvent(`Opponent's support: ${card.name}.`);
+      if(selectId!=='__random__') removeFromOppHand(card._uid||card.id);
+    }
     App._pendingOppSupportCard = null;
     B.atkStep = 'myReactiveSupport';
     renderAttackPhase(document.getElementById('phasePanel'));
@@ -884,7 +911,7 @@ const App = {
 
   pickMySupport(id){
     B.mySupportChoiceId = id || '';
-    const name = id ? (findInHand(B.myHand, id)||{}).name : 'no support';
+    const name = id==='__random__' ? 'a random card from my deck' : (id ? (findInHand(B.myHand, id)||{}).name : 'no support');
     logEvent(`You committed support: ${name}.`);
     if(B.turnPlayer==='me'){
       B.atkStep = 'resolve';
@@ -897,10 +924,14 @@ const App = {
   confirmOppSupportInfo(){
     const selectId = document.getElementById('oppSupportRevealSelect2') ? document.getElementById('oppSupportRevealSelect2').value : '';
     let card = null;
-    if(selectId) card = findInHand(B.oppHand, selectId) || null;
+    if(selectId==='__random__'){ card = {name:'(unknown/random card)', type:'unknown', note:'', effect:''}; }
+    else if(selectId) card = findInHand(B.oppHand, selectId) || null;
     else if(App._pendingOppSupportCard) card = App._pendingOppSupportCard;
     B.oppSupportRevealed = card;
-    if(card){ logEvent(`Opponent's support (reacting to yours): ${card.name}.`); removeFromOppHand(card._uid||card.id); }
+    if(card){
+      logEvent(`Opponent's support (reacting to yours): ${card.name}.`);
+      if(selectId!=='__random__') removeFromOppHand(card._uid||card.id);
+    }
     App._pendingOppSupportCard = null;
     B.atkStep = 'resolve';
     renderAttackPhase(document.getElementById('phasePanel'));
@@ -910,16 +941,21 @@ const App = {
   resolveTurn(){
     const oppAtk = document.getElementById('oppAtkFinal').value;
     const iAmTurnPlayer = B.turnPlayer==='me';
-    const mySupportCard = B.mySupportChoiceId ? findInHand(B.myHand, B.mySupportChoiceId) : null;
+    const mySupportCard = (B.mySupportChoiceId && B.mySupportChoiceId!=='__random__') ? findInHand(B.myHand, B.mySupportChoiceId) : null;
     const mySupportTags = mySupportCard ? parseEffectTags(effectText(mySupportCard)) : [];
-    const oppSupportTags = B.oppSupportRevealed ? parseEffectTags(effectText(B.oppSupportRevealed)) : [];
+    const oppSupportTags = (B.oppSupportRevealed && B.oppSupportRevealed.type!=='unknown') ? parseEffectTags(effectText(B.oppSupportRevealed)) : [];
 
     const cell = computeCell(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppAtk, mySupportTags, oppSupportTags, 0, iAmTurnPlayer);
     B.oppHp = Math.max(0, B.oppHp - cell.myDmg);
     B.myHp = Math.max(0, B.myHp - cell.oppDmg);
     if(mySupportCard) removeFromHand(mySupportCard._uid||mySupportCard.id);
 
-    logEvent(`You: ${B.myLockedAtk.toUpperCase()} (${cell.myDmg} dmg)${mySupportCard?' + '+mySupportCard.name:''} vs Opponent: ${oppAtk.toUpperCase()} (${cell.oppDmg} dmg)${B.oppSupportRevealed?' + '+B.oppSupportRevealed.name:''}. HP now You ${B.myHp} / Opp ${B.oppHp}.`);
+    const mySupportLabel = B.mySupportChoiceId==='__random__' ? ' + random card (unknown effect)' : (mySupportCard?' + '+mySupportCard.name:'');
+    const oppSupportLabel = B.oppSupportRevealed ? ' + '+B.oppSupportRevealed.name+(B.oppSupportRevealed.type==='unknown'?' (unknown effect)':'') : '';
+    logEvent(`You: ${B.myLockedAtk.toUpperCase()} (${cell.myDmg} dmg)${mySupportLabel} vs Opponent: ${oppAtk.toUpperCase()} (${cell.oppDmg} dmg)${oppSupportLabel}. HP now You ${B.myHp} / Opp ${B.oppHp}.`);
+    if(B.mySupportChoiceId==='__random__' || (B.oppSupportRevealed && B.oppSupportRevealed.type==='unknown')){
+      logEvent(`Note: a random/unknown card was played this bout — its effect wasn't modeled, so the damage above may not reflect what actually happened in-game.`);
+    }
 
     if(B.oppHp<=0 || B.myHp<=0){
       if(B.oppHp<=0 && B.myHp<=0){ logEvent('Both Digimon KO\u2019d in the same bout — check your rulebook for the tie-break.'); }
