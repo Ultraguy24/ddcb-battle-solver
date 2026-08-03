@@ -198,7 +198,7 @@ function maximin(grid){
 
 function rankSupportOptions(myCard, oppCard, myHp, oppHp, fixedA, hand, oppSupportTagsKnown, hiddenBuffer, iAmTurnPlayer){
   const candidates = [{id:'', name:'— none —', tags:[]}].concat(
-    hand.map(c=>({id:String(c.id), name:c.name + (c.type==='option'?' (option)':''), tags:parseEffectTags(effectText(c))}))
+    hand.map(c=>({id:String(c._uid||c.id), name:c.name + (c.type==='option'?' (option)':''), tags:parseEffectTags(effectText(c))}))
   );
   return candidates.map(cand=>{
     let worst = Infinity;
@@ -265,7 +265,7 @@ function rankEntranceCandidates(hand, oppActive, oppHp){
 
 function rankSupportOptionsOpenInfo(myCard, oppCard, myHp, oppHp, fixedA, myHand, oppHandCards, iAmTurnPlayer){
   const myCandidates = [{id:'', name:'— none —', tags:[]}].concat(
-    myHand.map(c=>({id:String(c.id), name:c.name + (c.type==='option'?' (option)':''), tags:parseEffectTags(effectText(c))}))
+    myHand.map(c=>({id:String(c._uid||c.id), name:c.name + (c.type==='option'?' (option)':''), tags:parseEffectTags(effectText(c))}))
   );
   const oppSupportCandidates = [[]].concat(
     (oppHandCards||[]).map(c=>parseEffectTags(effectText(c)))
@@ -322,8 +322,23 @@ function newDuel(){
   renderAll();
 }
 
-function removeFromHand(id){ B.myHand = B.myHand.filter(c=>String(c.id)!==String(id)); }
-function removeFromOppHand(id){ B.oppHand = B.oppHand.filter(c=>String(c.id)!==String(id)); }
+let handUidCounter = 0;
+function withUid(card){ return Object.assign({}, card, { _uid: card.id + '_h' + (++handUidCounter) }); }
+function findInHand(hand, idOrUid){
+  return hand.find(c=>String(c._uid)===String(idOrUid)) || hand.find(c=>String(c.id)===String(idOrUid)) || null;
+}
+function removeFromHand(idOrUid){
+  const i = B.myHand.findIndex(c=>String(c._uid)===String(idOrUid));
+  if(i>=0){ B.myHand.splice(i,1); return; }
+  const j = B.myHand.findIndex(c=>String(c.id)===String(idOrUid));
+  if(j>=0) B.myHand.splice(j,1);
+}
+function removeFromOppHand(idOrUid){
+  const i = B.oppHand.findIndex(c=>String(c._uid)===String(idOrUid));
+  if(i>=0){ B.oppHand.splice(i,1); return; }
+  const j = B.oppHand.findIndex(c=>String(c.id)===String(idOrUid));
+  if(j>=0) B.oppHand.splice(j,1);
+}
 function activeFor(player){ return player==='me' ? B.myActive : B.oppActive; }
 
 function beginTurnPhaseFor(player){
@@ -389,13 +404,13 @@ function renderStatePanel(){
     </div>
     <div class="row">
       <div class="col">
-        <label>YOUR HAND (add cards as you draw them — Digimon or Option cards)</label>
+        <label>YOUR HAND (add cards as you draw them — duplicates are fine, e.g. two Agumon)</label>
         <div class="search-box">
           <input id="handSearch" placeholder="Type a card name..." autocomplete="off">
           <div class="suggest-list" id="handSearch_list"></div>
         </div>
         <div class="hand-chips" id="handChips">
-          ${B.myHand.map(c=>`<span class="chip selected" data-remove="${c.id}">${c.name}${c.type==='option'?' <span class="small-note">(opt)</span>':''} ✕</span>`).join('')}
+          ${B.myHand.map(c=>`<span class="chip selected" data-remove="${c._uid}">${c.name}${c.type==='option'?' <span class="small-note">(opt)</span>':''} ✕</span>`).join('')}
         </div>
       </div>
       <div class="col">
@@ -405,22 +420,20 @@ function renderStatePanel(){
           <div class="suggest-list" id="oppHandSearch_list"></div>
         </div>
         <div class="hand-chips" id="oppHandChips">
-          ${B.oppHand.map(c=>`<span class="chip selected" data-oppremove="${c.id}">${c.name}${c.type==='option'?' <span class="small-note">(opt)</span>':''} ✕</span>`).join('')}
+          ${B.oppHand.map(c=>`<span class="chip selected" data-oppremove="${c._uid}">${c.name}${c.type==='option'?' <span class="small-note">(opt)</span>':''} ✕</span>`).join('')}
         </div>
       </div>
     </div>
   `;
   wireSearchBox('handSearch', {}, (card)=>{
     if(B.myHand.length>=4){ alert('Hand is already at 4 cards.'); return; }
-    if(B.myHand.some(c=>String(c.id)===String(card.id))){ return; }
-    B.myHand.push(card);
+    B.myHand.push(withUid(card));
     renderStatePanel();
     renderPhase();
   });
   wireSearchBox('oppHandSearch', {}, (card)=>{
     if(B.oppHand.length>=4){ alert("Opponent's hand is already at 4 cards."); return; }
-    if(B.oppHand.some(c=>String(c.id)===String(card.id))){ return; }
-    B.oppHand.push(card);
+    B.oppHand.push(withUid(card));
     renderStatePanel();
     renderPhase();
   });
@@ -513,7 +526,7 @@ function renderEntrancePhase(el){
             ${r.notes.length ? '<br><span class="small-note">'+r.notes.join(' ')+'</span>' : ''}
           </span>
           <span class="val">${r.matchupVal!==null ? (r.matchupVal>=0?'+':'')+r.matchupVal+' worst-case' : 'score '+r.heuristic}</span>
-          <button class="btn small secondary" onclick="App.pickEntrance('${r.card.id}')">USE THIS</button>
+          <button class="btn small secondary" onclick="App.pickEntrance('${r.card._uid||r.card.id}')">USE THIS</button>
         </div>`).join('') : '<div class="small-note">No Digimon cards in hand to enter with.</div>'}
     ` : ''}
     <label style="margin-top:14px">${isMe? 'OR SEARCH MANUALLY':"OPPONENT'S ACTIVE PICK"}</label>
@@ -550,7 +563,7 @@ function rankSacrificeOptions(myActive, myDpTotal, hand){
       note += ` Unlocks digivolving into ${newlyUnlocked.map(e=>e.name).join(', ')} THIS turn.`;
     }
     if(eff.notes.length) note += ' Giving up: ' + eff.notes.join(' ');
-    results.push({ id:String(card.id), name:card.name, note, score });
+    results.push({ id:String(card._uid||card.id), name:card.name, note, score });
   });
   return results.sort((a,b)=>b.score-a.score);
 }
@@ -577,14 +590,14 @@ function renderDpPhase(el){
       ${evoOptions.length ? evoOptions.map(c=>`
         <div class="suggestion-rank">
           <span><b>${c.name}</b> (${c.lvl}, needs ${c.dp} DP) — HP ${c.hp}, O ${c.o}/T ${c.t}/X ${c.x}</span>
-          <button class="btn small" onclick="App.doDigivolve('${c.id}')">DIGIVOLVE</button>
+          <button class="btn small" onclick="App.doDigivolve('${c._uid}')">DIGIVOLVE</button>
         </div>
       `).join('') : '<div class="small-note">No eligible digivolve targets in hand right now.</div>'}
     ` : `
       <label>DID THE OPPONENT SACRIFICE A CARD? (pick from their tracked hand)</label>
       <select id="oppSacSelect">
         <option value="">— none —</option>
-        ${B.oppHand.filter(c=>c.type==='digimon').map(c=>`<option value="${c.id}">${c.name} (+${c.pp||0} DP)</option>`).join('')}
+        ${B.oppHand.filter(c=>c.type==='digimon').map(c=>`<option value="${c._uid}">${c.name} (+${c.pp||0} DP)</option>`).join('')}
       </select>
       <button class="btn small" style="margin-top:8px" onclick="App.doOppSacrifice()">CONFIRM SACRIFICE</button>
       <div class="small-note" style="margin-top:6px">If their hand isn't fully tracked yet, you can enter it manually instead:</div>
@@ -595,7 +608,7 @@ function renderDpPhase(el){
         ${oppEvoPreview.map(c=>`
           <div class="suggestion-rank">
             <span><b>${c.name}</b> (${c.lvl}, needs ${c.dp} DP) — HP ${c.hp}, O ${c.o}/T ${c.t}/X ${c.x}</span>
-            <button class="btn small secondary" onclick="App.doOppDigivolve('${c.id}')">THEY DID THIS</button>
+            <button class="btn small secondary" onclick="App.doOppDigivolve('${c._uid}')">THEY DID THIS</button>
           </div>
         `).join('')}
       ` : `<h2 style="margin-top:16px">▸ DID OPPONENT DIGIVOLVE?</h2><div class="small-note">Nothing in their tracked hand is eligible at ${dpTotal} DP.</div>`}
@@ -658,7 +671,7 @@ function renderAttackPhase(el){
       <div class="small-note">It's your turn, so the opponent (non-turn player) commits their support first. Pick what they played from their tracked hand (or leave as none). This can be a tell for their attack.</div>
       <select id="oppSupportRevealSelect">
         <option value="">— none —</option>
-        ${B.oppHand.map(c=>`<option value="${c.id}">${c.name}${c.type==='option'?' (option)':''}</option>`).join('')}
+        ${B.oppHand.map(c=>`<option value="${c._uid}">${c.name}${c.type==='option'?' (option)':''}</option>`).join('')}
       </select>
       <div class="small-note" style="margin-top:8px">Not in their tracked hand? Enter manually:</div>
       <div class="search-box"><input id="oppSupportRevealInput" placeholder="Card name" autocomplete="off"><div class="suggest-list" id="oppSupportRevealInput_list"></div></div>
@@ -709,10 +722,10 @@ function renderAttackPhase(el){
   if(B.atkStep==='awaitOppSupportInfo'){
     el.innerHTML = `
       <h2>▸ OPPONENT REACTS</h2>
-      <div class="small-note">You committed ${B.mySupportChoiceId ? (B.myHand.find(c=>String(c.id)===String(B.mySupportChoiceId))||{}).name : 'no support'}. The opponent (turn player) now sees that and picks their support. What did they play?</div>
+      <div class="small-note">You committed ${B.mySupportChoiceId ? (findInHand(B.myHand, B.mySupportChoiceId)||{}).name : 'no support'}. The opponent (turn player) now sees that and picks their support. What did they play?</div>
       <select id="oppSupportRevealSelect2">
         <option value="">— none —</option>
-        ${B.oppHand.map(c=>`<option value="${c.id}">${c.name}${c.type==='option'?' (option)':''}</option>`).join('')}
+        ${B.oppHand.map(c=>`<option value="${c._uid}">${c.name}${c.type==='option'?' (option)':''}</option>`).join('')}
       </select>
       <div class="small-note" style="margin-top:8px">Not in their tracked hand? Enter manually:</div>
       <div class="search-box"><input id="oppSupportRevealInput2" placeholder="Card name" autocomplete="off"><div class="suggest-list" id="oppSupportRevealInput2_list"></div></div>
@@ -727,7 +740,7 @@ function renderAttackPhase(el){
   }
 
   if(B.atkStep==='resolve'){
-    const mySupportCard = B.mySupportChoiceId ? B.myHand.find(c=>String(c.id)===String(B.mySupportChoiceId)) : null;
+    const mySupportCard = B.mySupportChoiceId ? findInHand(B.myHand, B.mySupportChoiceId) : null;
     el.innerHTML = `
       <h2>▸ RESOLVE — WHAT ACTUALLY HAPPENED</h2>
       <div class="small-note">You attacked <b>${B.myLockedAtk.toUpperCase()}</b>${mySupportCard?' with support '+mySupportCard.name:''}. What did the opponent attack with?</div>
@@ -760,7 +773,7 @@ const App = {
   },
 
   pickEntrance(cardId){
-    const card = B.myHand.find(c=>String(c.id)===String(cardId));
+    const card = findInHand(B.myHand, cardId);
     if(!card) return;
     applyEntranceSelection(card);
   },
@@ -769,7 +782,7 @@ const App = {
     const picked = App._entrancePicked;
     if(!picked){ alert('Pick a Digimon first.'); return; }
     if(B.turnPlayer==='me'){
-      removeFromHand(picked.raw.id);
+      removeFromHand(picked.raw._uid||picked.raw.id);
       B.myActive = picked.adjusted; B.myHp = picked.adjusted.hp;
       logEvent(`You enter with ${picked.adjusted.name}${(picked.raw.lvl==='C'||picked.raw.lvl==='U')?' (halved on entry)':''}.`);
     } else {
@@ -783,10 +796,10 @@ const App = {
 
   doSacrifice(id){
     if(!id){ logEvent('You chose not to sacrifice this turn.'); renderDpPhase(document.getElementById('phasePanel')); return; }
-    const card = B.myHand.find(c=>String(c.id)===String(id));
+    const card = findInHand(B.myHand, id);
     if(!card) return;
     B.myDpTotal += (card.pp||0);
-    removeFromHand(card.id);
+    removeFromHand(card._uid||card.id);
     logEvent(`You sacrificed ${card.name} for +${card.pp||0} DP (total ${B.myDpTotal}).`);
     renderDpPhase(document.getElementById('phasePanel'));
     renderStatePanel(); renderHeader();
@@ -795,10 +808,10 @@ const App = {
   doOppSacrifice(){
     const selectId = document.getElementById('oppSacSelect').value;
     if(selectId){
-      const card = B.oppHand.find(c=>String(c.id)===String(selectId));
+      const card = findInHand(B.oppHand, selectId);
       if(card){
         B.oppDpTotal += (card.pp||0);
-        removeFromOppHand(card.id);
+        removeFromOppHand(card._uid||card.id);
         logEvent(`Opponent sacrificed ${card.name} for +${card.pp||0} DP (total ${B.oppDpTotal}).`);
       }
       renderDpPhase(document.getElementById('phasePanel')); renderStatePanel(); renderHeader();
@@ -817,9 +830,9 @@ const App = {
   },
 
   doOppDigivolve(cardId){
-    const card = B.oppHand.find(c=>String(c.id)===String(cardId));
+    const card = findInHand(B.oppHand, cardId);
     if(!card) return;
-    removeFromOppHand(card.id);
+    removeFromOppHand(card._uid||card.id);
     B.oppActive = Object.assign({}, card);
     B.oppHp = card.hp;
     logEvent(`Opponent digivolved to ${card.name}.`);
@@ -827,9 +840,9 @@ const App = {
   },
 
   doDigivolve(cardId){
-    const card = B.myHand.find(c=>String(c.id)===String(cardId));
+    const card = findInHand(B.myHand, cardId);
     if(!card) return;
-    removeFromHand(card.id);
+    removeFromHand(card._uid||card.id);
     B.myActive = Object.assign({}, card);
     B.myHp = card.hp;
     logEvent(`You digivolved to ${card.name}.`);
@@ -859,10 +872,10 @@ const App = {
   confirmOppSupportReveal(){
     const selectId = document.getElementById('oppSupportRevealSelect') ? document.getElementById('oppSupportRevealSelect').value : '';
     let card = null;
-    if(selectId) card = B.oppHand.find(c=>String(c.id)===String(selectId)) || null;
+    if(selectId) card = findInHand(B.oppHand, selectId) || null;
     else if(App._pendingOppSupportCard) card = App._pendingOppSupportCard;
     B.oppSupportRevealed = card;
-    if(card){ logEvent(`Opponent's support: ${card.name}.`); removeFromOppHand(card.id); }
+    if(card){ logEvent(`Opponent's support: ${card.name}.`); removeFromOppHand(card._uid||card.id); }
     App._pendingOppSupportCard = null;
     B.atkStep = 'myReactiveSupport';
     renderAttackPhase(document.getElementById('phasePanel'));
@@ -871,7 +884,7 @@ const App = {
 
   pickMySupport(id){
     B.mySupportChoiceId = id || '';
-    const name = id ? (B.myHand.find(c=>String(c.id)===String(id))||{}).name : 'no support';
+    const name = id ? (findInHand(B.myHand, id)||{}).name : 'no support';
     logEvent(`You committed support: ${name}.`);
     if(B.turnPlayer==='me'){
       B.atkStep = 'resolve';
@@ -884,10 +897,10 @@ const App = {
   confirmOppSupportInfo(){
     const selectId = document.getElementById('oppSupportRevealSelect2') ? document.getElementById('oppSupportRevealSelect2').value : '';
     let card = null;
-    if(selectId) card = B.oppHand.find(c=>String(c.id)===String(selectId)) || null;
+    if(selectId) card = findInHand(B.oppHand, selectId) || null;
     else if(App._pendingOppSupportCard) card = App._pendingOppSupportCard;
     B.oppSupportRevealed = card;
-    if(card){ logEvent(`Opponent's support (reacting to yours): ${card.name}.`); removeFromOppHand(card.id); }
+    if(card){ logEvent(`Opponent's support (reacting to yours): ${card.name}.`); removeFromOppHand(card._uid||card.id); }
     App._pendingOppSupportCard = null;
     B.atkStep = 'resolve';
     renderAttackPhase(document.getElementById('phasePanel'));
@@ -897,14 +910,14 @@ const App = {
   resolveTurn(){
     const oppAtk = document.getElementById('oppAtkFinal').value;
     const iAmTurnPlayer = B.turnPlayer==='me';
-    const mySupportCard = B.mySupportChoiceId ? B.myHand.find(c=>String(c.id)===String(B.mySupportChoiceId)) : null;
+    const mySupportCard = B.mySupportChoiceId ? findInHand(B.myHand, B.mySupportChoiceId) : null;
     const mySupportTags = mySupportCard ? parseEffectTags(effectText(mySupportCard)) : [];
     const oppSupportTags = B.oppSupportRevealed ? parseEffectTags(effectText(B.oppSupportRevealed)) : [];
 
     const cell = computeCell(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppAtk, mySupportTags, oppSupportTags, 0, iAmTurnPlayer);
     B.oppHp = Math.max(0, B.oppHp - cell.myDmg);
     B.myHp = Math.max(0, B.myHp - cell.oppDmg);
-    if(mySupportCard) removeFromHand(mySupportCard.id);
+    if(mySupportCard) removeFromHand(mySupportCard._uid||mySupportCard.id);
 
     logEvent(`You: ${B.myLockedAtk.toUpperCase()} (${cell.myDmg} dmg)${mySupportCard?' + '+mySupportCard.name:''} vs Opponent: ${oppAtk.toUpperCase()} (${cell.oppDmg} dmg)${B.oppSupportRevealed?' + '+B.oppSupportRevealed.name:''}. HP now You ${B.myHp} / Opp ${B.oppHp}.`);
 
