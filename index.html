@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>D.D.C.B. Battle Solver</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>D.D.C.B. BATTLE SOLVER<span class="sub">DIGIMON DIGITAL CARD BATTLE // DECISION ENGINE</span></h1>
+    <nav>
+      <button data-tab="battle" class="active">LIVE BATTLE</button>
+      <button data-tab="db">CARD DB</button>
+      <button data-tab="help">HOW IT WORKS</button>
+    </nav>
+  </header>
+
+  <div class="panel" id="loadError" style="display:none;border-color:var(--red);color:var(--red)"></div>
+  <div class="tabsection active" id="tab-battle">
+    <div class="panel" id="battleHeader"></div>
+    <div class="panel" id="statePanel"></div>
+    <div class="panel" id="phasePanel"></div>
+    <div class="panel">
+      <h2>▸ BATTLE LOG</h2>
+      <div class="log-list" id="logList"></div>
+    </div>
+  </div>
+  <div class="tabsection" id="tab-db">
+    <div class="panel">
+      <div class="flex-between">
+        <h2 style="border:none;margin:0">▸ DIGIMON CARD DATABASE (<span id="dbCount">0</span> cards)</h2>
+        <div class="pill-btns">
+          <button class="btn small secondary" id="addCardBtn">+ ADD CUSTOM CARD</button>
+          <button class="btn small secondary" id="resetDbBtn">RESET MY EDITS</button>
+        </div>
+      </div>
+      <div class="small-note" style="margin-bottom:8px">This reads from <code>cards.json</code> in this same folder — edit that file directly to fix data, add the missing cards, or reorder entries to match your in-game list. Your in-app edits are saved separately and layered on top automatically.</div>
+      <div class="searchbar"><input id="dbSearch" placeholder="Search by name..."></div>
+      <div class="pill-btns" id="specFilters" style="margin-bottom:10px"></div>
+      <div class="edit-form" id="editForm">
+        <h2 style="border:none">EDIT / ADD CARD</h2>
+        <input type="hidden" id="ef-id">
+        <div class="grid3">
+          <div><label>NAME</label><input id="ef-name"></div>
+          <div><label>LEVEL (R/C/U/A)</label><input id="ef-lvl"></div>
+          <div><label>SPECIALTY</label>
+            <select id="ef-spec"><option>Fire</option><option>Water</option><option>Nature</option><option>Darkness</option><option>Rare</option><option>Partner</option></select>
+          </div>
+        </div>
+        <div class="grid3">
+          <div><label>HP</label><input type="number" id="ef-hp"></div>
+          <div><label>DP COST</label><input type="number" id="ef-dp"></div>
+          <div><label>+P (DP GAINED IN DP SLOT)</label><input type="number" id="ef-pp"></div>
+        </div>
+        <div class="grid3">
+          <div><label>CIRCLE (O)</label><input type="number" id="ef-o"></div>
+          <div><label>TRIANGLE (T)</label><input type="number" id="ef-t"></div>
+          <div><label>CROSS (X)</label><input type="number" id="ef-x"></div>
+        </div>
+        <label>X-EFFECT TAG (e.g. "O to 0", "fire foe x3", "1st attack", "O counter", "jamming", "none")</label>
+        <input id="ef-xt">
+        <label>SUPPORT / NOTE TEXT (used when this card is played from hand as a Support Card)</label>
+        <textarea id="ef-note" rows="2"></textarea>
+        <div style="margin-top:10px">
+          <button class="btn small" id="saveCardBtn">SAVE</button>
+          <button class="btn small secondary" id="cancelEditBtn">CANCEL</button>
+        </div>
+      </div>
+      <div class="db-scroll">
+        <table class="db" id="dbTable">
+          <thead><tr>
+            <th data-sort="id">#</th><th data-sort="name">Name</th><th data-sort="lvl">Lvl</th><th data-sort="sp">Specialty</th>
+            <th data-sort="hp">HP</th><th data-sort="dp">DP</th><th data-sort="pp">+P</th>
+            <th data-sort="o">O</th><th data-sort="t">T</th><th data-sort="x">X</th><th>X-Effect</th><th></th>
+          </tr></thead>
+          <tbody id="dbBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>▸ OPTION CARD REFERENCE (<span id="optCount">0</span>)</h2>
+      <div class="small-note" style="margin-bottom:8px">Playable from hand as a Support Card this turn. Numeric effects (flat/attack-specific boosts, doubles, negations) are auto-recognized in the Live Battle tab; everything else is shown for your own judgment.</div>
+      <input id="optSearch" placeholder="Search option cards...">
+      <div class="db-scroll" style="margin-top:8px"><table class="db"><tbody id="optBody"></tbody></table></div>
+    </div>
+  </div>
+  <div class="tabsection" id="tab-help">
+    <div class="panel">
+      <h2>▸ FILES IN THIS FOLDER</h2>
+      <div class="assumptions">
+        <b>index.html</b> — page structure only.<br>
+        <b>style.css</b> — all visual styling.<br>
+        <b>app.js</b> — all game logic: the solver math, the phase-by-phase battle flow, and the card database tab.<br>
+        <b>cards.json</b> — every card (Digimon + Option), as plain editable JSON. Edit it directly to correct data, add the cards still missing, or reorder entries to match your in-game card list — the app just reads whatever order is in the file.<br><br>
+        <b>Important:</b> if you open <code>index.html</code> by double-clicking it, Chrome/Edge will block the <code>fetch('cards.json')</code> call due to local-file CORS rules, and you'll see a red error banner. Either use Firefox (which allows it), or run a tiny local server from this folder:
+        <br><code>python3 -m http.server 8000</code> then open <code>http://localhost:8000/index.html</code>.
+      </div>
+    </div>
+    <div class="panel">
+      <h2>▸ HOW THE BATTLE FLOW WORKS</h2>
+      <div class="assumptions">
+        <b>Turns are sequential, not simultaneous.</b> One player runs their whole turn (Entrance if they have no active → DP Phase → digivolve check), then the turn passes to the other player. The <b>Attack Phase only happens if both sides currently have an active</b> — otherwise it's skipped and play passes on.<br><br>
+        <b>Kickoff</b> — tell the tool who won the random first-turn draw. This matters a lot: the turn player attacks first by default every bout, and also gets to commit their support card <i>second</i>, reacting to what the non-turn player already revealed.<br><br>
+        <b>Entrance</b> — pick the active Digimon for whichever side's turn it is. Entering directly with a Champion or Ultimate (instead of digivolving up to it later) automatically halves that card's HP and all three attacks — the tool applies this for you.<br><br>
+        <b>DP Phase</b> — the turn player may sacrifice one hand card for DP, <i>or</i> digivolve using already-banked DP, but never both in the same turn. DP totals persist across the whole duel.<br><br>
+        <b>Attack Phase</b> — both sides pick an attack blind. Then support is revealed in a fixed order: the <b>non-turn player commits first</b>, and the <b>turn player reacts second</b> with full knowledge of that. The tool splits this into the right steps depending on whose turn it is, and ranks your hand's support options (including "none") by worst-case outcome at each step.<br><br>
+        <b>Opponent's hand is visible</b> in this game, so track it in the "Opponent's Hand" box just like your own. This upgrades the non-turn-player support commitment from a guess into a true worst-case calculation: instead of padding their damage with an assumed buffer, the tool checks every attack × every real support card actually in their tracked hand and finds the genuine worst case. Keep it accurate — an empty tracked hand is treated as "they have nothing," which will overstate how safe a pick is if you just haven't logged their cards yet.<br><br>
+        <b>Sacrifice/digivolve are not mutually exclusive</b> — you can do both in the same DP phase. The Sacrifice Advisor accounts for this: sacrificing a specific card gets a large bonus if doing so would immediately unlock a digivolve target already sitting in your hand this same turn.<br><br>
+        <b>Damage resolution:</b> the turn player's attack lands first by default. If it KOs the opponent, their attack never happens. A card's own "1st attack" trait (or an unconditional "Attack first" support effect) only matters for the <i>non-turn</i> player — it's how they steal that order away; it does nothing for the turn player, who already had priority.<br><br>
+        <b>What's auto-modeled:</b> base attack values; "&lt;Specialty&gt; foe x3"-style Cross bonuses; "O/T/X to 0" negation; turn-order-based first strike (with steal-back via "1st attack" traits); "force both players to attack X" support effects; and common Option/support numeric effects (flat boosts, attack-specific boosts, attack doubling, attack zeroing).<br>
+        <b>What's shown as text only:</b> discards, HP swaps, specialty swaps, "jamming," "counter" ordering effects, and anything conditional on hidden information — these get flagged so you can factor them in yourself.
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
