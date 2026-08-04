@@ -234,10 +234,12 @@ function rankSupportOptions(myCard, oppCard, myHp, oppHp, fixedA, hand, oppSuppo
   }).sort((x,y)=>y.worst-x.worst);
 }
 
+function halveToNearestTen(val){ return Math.floor(val/20)*10; }
+
 function adjustForEntrance(card){
   if(card.lvl==='C' || card.lvl==='U'){
     return Object.assign({}, card, {
-      hp:Math.round(card.hp/2), o:Math.round(card.o/2), t:Math.round(card.t/2), x:Math.round(card.x/2), _halved:true
+      hp:halveToNearestTen(card.hp), o:halveToNearestTen(card.o), t:halveToNearestTen(card.t), x:halveToNearestTen(card.x), _halved:true
     });
   }
   return Object.assign({}, card, {_halved:false});
@@ -972,11 +974,19 @@ const App = {
     }
 
     if(B.oppHp<=0 || B.myHp<=0){
-      if(B.oppHp<=0 && B.myHp<=0){ logEvent('Both Digimon KO\u2019d in the same bout — check your rulebook for the tie-break.'); }
-      else if(B.oppHp<=0){ B.myScore++; logEvent(`${B.oppActive.name} is KO'd! You win round ${B.round}.`); }
-      else { B.oppScore++; logEvent(`${B.myActive.name} is KO'd! Opponent wins round ${B.round}.`); }
+      if(B.oppHp<=0 && B.myHp<=0){
+        logEvent('Both Digimon KO\u2019d in the same bout — check your rulebook for the tie-break.');
+        B.myActive=null; B.myHp=0; B.oppActive=null; B.oppHp=0;
+      } else if(B.oppHp<=0){
+        B.myScore++;
+        logEvent(`${B.oppActive.name} is KO'd! You win round ${B.round}. Your ${B.myActive.name} carries ${B.myHp} HP into the next round.`);
+        B.oppActive=null; B.oppHp=0;
+      } else {
+        B.oppScore++;
+        logEvent(`${B.myActive.name} is KO'd! Opponent wins round ${B.round}. Their ${B.oppActive.name} carries ${B.oppHp} HP into the next round.`);
+        B.myActive=null; B.myHp=0;
+      }
       B.round++;
-      B.myActive=null; B.oppActive=null; B.myHp=0; B.oppHp=0;
     }
 
     B.myLockedAtk=null; B.mySupportChoiceId=''; B.oppSupportRevealed=null;
