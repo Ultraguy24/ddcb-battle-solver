@@ -101,9 +101,9 @@ function parseEffectTags(text){
   if(m = /Opponent'?s\s+(O|T|X|Circle|Triangle|Cross)\s+[Aa]ttack power (?:is|goes to|becomes) 0/i.exec(text)){
     tags.push({type:'zeroOppAttack', attack:wordToAtk(m[1])});
   }
-  if(m = /Boost own\s+(O|T|X|Circle|Triangle|Cross)\s+[Aa]ttack power\s*([+-]\d+)/i.exec(text)){
+  if(m = /(?:Boost|Reduce) own\s+(O|T|X|Circle|Triangle|Cross)\s+[Aa]ttack power\s*([+-]\d+)/i.exec(text)){
     tags.push({type:'boostOwnAttackSpecific', attack:wordToAtk(m[1]), amount:parseInt(m[2])});
-  } else if(m = /Boost own attack power\s*([+-]\d+)/i.exec(text)){
+  } else if(m = /(?:Boost|Reduce) own attack power\s*([+-]\d+)/i.exec(text)){
     tags.push({type:'boostOwnAttack', amount:parseInt(m[1])});
   }
   if(m = /Recover own HP by\s*\+?(\d+)/i.exec(text)){
@@ -780,7 +780,10 @@ function renderAttackPhase(el){
     el.innerHTML = `
       <h2>▸ RESOLVE — WHAT ACTUALLY HAPPENED</h2>
       <div class="small-note">You attacked <b>${B.myLockedAtk.toUpperCase()}</b>${mySupportCard?' with support '+mySupportCard.name:''}. What did the opponent attack with?</div>
-      <select id="oppAtkFinal"><option value="o">Circle</option><option value="t">Triangle</option><option value="x">Cross</option></select>
+      <select id="oppAtkFinal">
+        <option value="o">Circle</option><option value="t">Triangle</option><option value="x">Cross</option>
+        <option value="__unknown__">Don't know — I KO'd them before they could act</option>
+      </select>
       <button class="btn" style="margin-top:14px" onclick="App.resolveTurn()">RESOLVE TURN</button>
     `;
     return;
@@ -955,11 +958,27 @@ const App = {
   },
 
   resolveTurn(){
-    const oppAtk = document.getElementById('oppAtkFinal').value;
+    let oppAtk = document.getElementById('oppAtkFinal').value;
     const iAmTurnPlayer = B.turnPlayer==='me';
     const mySupportCard = (B.mySupportChoiceId && B.mySupportChoiceId!=='__random__') ? findInHand(B.myHand, B.mySupportChoiceId) : null;
     const mySupportTags = mySupportCard ? parseEffectTags(effectText(mySupportCard)) : [];
     const oppSupportTags = (B.oppSupportRevealed && B.oppSupportRevealed.type!=='unknown') ? parseEffectTags(effectText(B.oppSupportRevealed)) : [];
+
+    let unknownNote = '';
+    if(oppAtk==='__unknown__'){
+      const options = ['o','t','x'].map(b=>computeCell(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, b, mySupportTags, oppSupportTags, 0, iAmTurnPlayer));
+      const allSame = options.every(c=>c.myDmg===options[0].myDmg && c.oppDmg===options[0].oppDmg);
+      if(allSame){
+        oppAtk = 'o'; // doesn't matter which -- outcome is identical either way, confirmed below
+        unknownNote = ' (outcome was the same regardless of their attack, since they never got to act)';
+      } else {
+        // Not actually invariant -- don't guess in their favor. Assume the worst case for the player.
+        let worstIdx = 0, worstNet = Infinity;
+        options.forEach((c,i)=>{ const net = c.myDmg - c.oppDmg; if(net<worstNet){ worstNet=net; worstIdx=i; } });
+        oppAtk = ['o','t','x'][worstIdx];
+        unknownNote = ' (their actual attack was unknown and the outcome WOULD have differed by choice -- assumed their worst-case attack against you as a conservative estimate; correct this manually if you later find out what they had queued)';
+      }
+    }
 
     const cell = computeCell(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppAtk, mySupportTags, oppSupportTags, 0, iAmTurnPlayer);
     B.oppHp = Math.max(0, B.oppHp - cell.myDmg);
@@ -968,7 +987,7 @@ const App = {
 
     const mySupportLabel = B.mySupportChoiceId==='__random__' ? ' + random card (unknown effect)' : (mySupportCard?' + '+mySupportCard.name:'');
     const oppSupportLabel = B.oppSupportRevealed ? ' + '+B.oppSupportRevealed.name+(B.oppSupportRevealed.type==='unknown'?' (unknown effect)':'') : '';
-    logEvent(`You: ${B.myLockedAtk.toUpperCase()} (${cell.myDmg} dmg)${mySupportLabel} vs Opponent: ${oppAtk.toUpperCase()} (${cell.oppDmg} dmg)${oppSupportLabel}. HP now You ${B.myHp} / Opp ${B.oppHp}.`);
+    logEvent(`You: ${B.myLockedAtk.toUpperCase()} (${cell.myDmg} dmg)${mySupportLabel} vs Opponent: ${oppAtk.toUpperCase()} (${cell.oppDmg} dmg)${oppSupportLabel}${unknownNote}. HP now You ${B.myHp} / Opp ${B.oppHp}.`);
     if(B.mySupportChoiceId==='__random__' || (B.oppSupportRevealed && B.oppSupportRevealed.type==='unknown')){
       logEvent(`Note: a random/unknown card was played this bout — its effect wasn't modeled, so the damage above may not reflect what actually happened in-game.`);
     }
