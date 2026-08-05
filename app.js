@@ -109,6 +109,9 @@ function parseEffectTags(text){
   if(m = /Recover own HP by\s*\+?(\d+)/i.exec(text)){
     tags.push({type:'healSelf', amount:parseInt(m[1])});
   }
+  if(m = /Recover foe'?s HP by\s*\+?(\d+)/i.exec(text)){
+    tags.push({type:'healOpp', amount:parseInt(m[1])});
+  }
   if(/Own HP are halved/i.test(text)) tags.push({type:'halveSelfHp'});
   if(/Opponent'?s HP are halved/i.test(text)) tags.push({type:'halveOppHp'});
   const hasSpecificAttackWord = /Own\s+(O|T|X|Circle|Triangle|Cross)\s+[Aa]ttack/i.test(text);
@@ -132,12 +135,26 @@ function parseEffectTags(text){
     // original chosen attack, not the redirected one. (Disrupt Ray: O->T, T->X, X->O)
     tags.push({type:'redirectOtherAttackValue', map:{o:'t', t:'x', x:'o'}});
   }
+  // Common "if both attacks are the same/different" conditional prefix --
+  // applies to whatever effect(s) the rest of the sentence produced above.
+  let condition = null;
+  if(/If both (?:players'? )?attacks? (?:are|is) different/i.test(text)) condition = 'attacksDiffer';
+  else if(/If both (?:players'? )?(?:attacks?|use the same attack)/i.test(text) && /same/i.test(text)) condition = 'attacksSame';
+  if(condition) tags.forEach(t=>{ t.condition = condition; });
   return tags;
 }
 
 function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSupportTags, hiddenBuffer, iAmTurnPlayer){
   mySupportTags = mySupportTags||[]; oppSupportTags = oppSupportTags||[]; hiddenBuffer = hiddenBuffer||0;
-
+  const origA = a, origB = b;
+  function conditionMet(tag){
+    if(!tag.condition) return true;
+    if(tag.condition==='attacksDiffer') return origA !== origB;
+    if(tag.condition==='attacksSame') return origA === origB;
+    return true;
+  }
+  mySupportTags = mySupportTags.filter(conditionMet);
+  oppSupportTags = oppSupportTags.filter(conditionMet);
 
   mySupportTags.concat(oppSupportTags).forEach(tag=>{
     if(tag.type==='forceBothAttack'){ a = tag.attack; b = tag.attack; }
@@ -176,9 +193,6 @@ function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSuppo
   myDmg = Math.max(0, Math.round(myDmg));
   oppDmg = Math.max(0, Math.round(oppDmg));
 
-
-
-
   const iCanSteal = activeGrantsFirstStrike(myCard, a) || mySupportTags.some(t=>t.type==='firstStrike');
   const oppCanSteal = activeGrantsFirstStrike(oppCard, b) || oppSupportTags.some(t=>t.type==='firstStrike');
   let myGoesFirst;
@@ -197,7 +211,26 @@ function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSuppo
   }
 
   if(hiddenBuffer) oppDmg += hiddenBuffer;
-  return { myDmg, oppDmg, koOpp: myDmg>=oppHp, koMe: oppDmg>=myHp };
+
+  // HP-modifying effects (healing, halving) -- these change actual HP totals,
+  // separate from the damage swing used for solver ranking. The resolver
+  // applies these to real HP; ranking/matrix code can ignore them if it wants
+  // pure damage-swing comparisons.
+  let myHealAmt = 0, oppHealAmt = 0, myHalve = false, oppHalve = false;
+  mySupportTags.forEach(tag=>{
+    if(tag.type==='healSelf') myHealAmt += tag.amount;
+    if(tag.type==='healOpp') oppHealAmt += tag.amount;
+    if(tag.type==='halveSelfHp') myHalve = true;
+    if(tag.type==='halveOppHp') oppHalve = true;
+  });
+  oppSupportTags.forEach(tag=>{
+    if(tag.type==='healSelf') oppHealAmt += tag.amount;
+    if(tag.type==='healOpp') myHealAmt += tag.amount;
+    if(tag.type==='halveSelfHp') oppHalve = true;
+    if(tag.type==='halveOppHp') myHalve = true;
+  });
+
+  return { myDmg, oppDmg, koOpp: myDmg>=oppHp, koMe: oppDmg>=myHp, myHealAmt, oppHealAmt, myHalve, oppHalve };
 }
 
 function computeMatrix(myCard, oppCard, myHp, oppHp, mySupportTags, hiddenBuffer, iAmTurnPlayer){
@@ -316,6 +349,24 @@ function digivolveOptions(myCard, myDp, hand){
     if(c.lvl==='A') return true;
     return (order[c.lvl] === order[myCard.lvl]+1) && (myDp>=c.dp);
   });
+}
+
+// Speed Digivolve: same specialty/level-step requirement as a normal digivolve,
+// but ignores the DP cost entirely.
+function speedDigivolveOptions(myCard, hand){
+  const order = {R:0,C:1,U:2,A:0};
+  return hand.filter(c=>{
+    if(c.type!=='digimon') return false;
+    if(c.sp !== myCard.sp) return false;
+    if(c.lvl==='A') return true;
+    return order[c.lvl] === order[myCard.lvl]+1;
+  });
+}
+function hasSpeedDigivolveCard(hand){
+  return hand.some(c=> /disregard DP when digivolving/i.test(effectText(c)) || /^Speed-?\s*digivolve$/i.test((c.name||'').trim()));
+}
+function findSpeedDigivolveCard(hand){
+  return hand.find(c=> /disregard DP when digivolving/i.test(effectText(c)) || /^Speed-?\s*digivolve$/i.test((c.name||'').trim()));
 }
 
 const B = {
@@ -600,6 +651,8 @@ function renderDpPhase(el){
   const evoOptions = (isMe && active) ? digivolveOptions(active, dpTotal, B.myHand) : [];
   const sacRanked = (isMe && active) ? rankSacrificeOptions(active, dpTotal, B.myHand) : [];
   const oppEvoPreview = (!isMe && active) ? digivolveOptions(active, dpTotal, B.oppHand) : [];
+  const speedCard = (isMe && active) ? findSpeedDigivolveCard(B.myHand) : null;
+  const speedOptions = speedCard ? speedDigivolveOptions(active, B.myHand.filter(c=>c._uid!==speedCard._uid)) : [];
 
   el.innerHTML = `
     <h2>▸ DP PHASE (${isMe?'YOUR':"OPPONENT'S"} TURN)</h2>
@@ -618,6 +671,15 @@ function renderDpPhase(el){
           <button class="btn small" onclick="App.doDigivolve('${c._uid}')">DIGIVOLVE</button>
         </div>
       `).join('') : '<div class="small-note">No eligible digivolve targets in hand right now.</div>'}
+      ${speedCard ? `
+        <h2 style="margin-top:16px">▸ SPEED DIGIVOLVE AVAILABLE (${speedCard.name} in hand — ignores DP cost)</h2>
+        ${speedOptions.length ? speedOptions.map(c=>`
+          <div class="suggestion-rank">
+            <span><b>${c.name}</b> (${c.lvl}, DP cost waived) — HP ${c.hp}, O ${c.o}/T ${c.t}/X ${c.x}</span>
+            <button class="btn small" onclick="App.doSpeedDigivolve('${c._uid}')">SPEED DIGIVOLVE</button>
+          </div>
+        `).join('') : '<div class="small-note">No eligible same-specialty target in hand right now to use it on.</div>'}
+      ` : ''}
     ` : `
       <label>DID THE OPPONENT SACRIFICE A CARD? (pick from their tracked hand)</label>
       <select id="oppSacSelect">
@@ -776,16 +838,34 @@ function renderAttackPhase(el){
   }
 
   if(B.atkStep==='resolve'){
-    const mySupportCard = B.mySupportChoiceId ? findInHand(B.myHand, B.mySupportChoiceId) : null;
+    const mySupportCard = (B.mySupportChoiceId && B.mySupportChoiceId!=='__random__') ? findInHand(B.myHand, B.mySupportChoiceId) : null;
+    const myWasRandom = B.mySupportChoiceId==='__random__';
+    const oppWasRandom = B.oppSupportRevealed && B.oppSupportRevealed.type==='unknown';
     el.innerHTML = `
       <h2>▸ RESOLVE — WHAT ACTUALLY HAPPENED</h2>
-      <div class="small-note">You attacked <b>${B.myLockedAtk.toUpperCase()}</b>${mySupportCard?' with support '+mySupportCard.name:''}. What did the opponent attack with?</div>
+      <div class="small-note">You attacked <b>${B.myLockedAtk.toUpperCase()}</b>${mySupportCard?' with support '+mySupportCard.name:(myWasRandom?' with a random card':'')}. What did the opponent attack with?</div>
       <select id="oppAtkFinal">
         <option value="o">Circle</option><option value="t">Triangle</option><option value="x">Cross</option>
         <option value="__unknown__">Don't know — I KO'd them before they could act</option>
       </select>
+      ${myWasRandom ? `
+        <label style="margin-top:12px">YOUR RANDOM CARD WAS REVEALED AS (if you know now)</label>
+        <div class="search-box"><input id="myRandomReveal" placeholder="Card name, if revealed" autocomplete="off"><div class="suggest-list" id="myRandomReveal_list"></div></div>
+      ` : ''}
+      ${oppWasRandom ? `
+        <label style="margin-top:12px">OPPONENT'S RANDOM CARD WAS REVEALED AS (if you know now)</label>
+        <div class="search-box"><input id="oppRandomReveal" placeholder="Card name, if revealed" autocomplete="off"><div class="suggest-list" id="oppRandomReveal_list"></div></div>
+      ` : ''}
       <button class="btn" style="margin-top:14px" onclick="App.resolveTurn()">RESOLVE TURN</button>
     `;
+    if(myWasRandom) wireSearchBox('myRandomReveal', {}, (card)=>{
+      document.getElementById('myRandomReveal').value = card.name;
+      App._myRandomRevealCard = card;
+    });
+    if(oppWasRandom) wireSearchBox('oppRandomReveal', {}, (card)=>{
+      document.getElementById('oppRandomReveal').value = card.name;
+      App._oppRandomRevealCard = card;
+    });
     return;
   }
 }
@@ -891,6 +971,18 @@ const App = {
     renderAll();
   },
 
+  doSpeedDigivolve(cardId){
+    const target = findInHand(B.myHand, cardId);
+    const speedCard = findSpeedDigivolveCard(B.myHand);
+    if(!target || !speedCard) return;
+    removeFromHand(target._uid||target.id);
+    removeFromHand(speedCard._uid||speedCard.id);
+    B.myActive = Object.assign({}, target);
+    B.myHp = target.hp;
+    logEvent(`You Speed Digivolved to ${target.name} using ${speedCard.name} (DP cost waived, DP total unchanged).`);
+    renderAll();
+  },
+
   confirmDpDone(){
     if(!B.myActive || !B.oppActive){
       logEvent(`${B.turnPlayer==='me'?'You have':'Opponent has'} no opposing active yet — battle phase skipped.`);
@@ -960,9 +1052,15 @@ const App = {
   resolveTurn(){
     let oppAtk = document.getElementById('oppAtkFinal').value;
     const iAmTurnPlayer = B.turnPlayer==='me';
+
+    // If a random card's identity was revealed after the fact, use its real tags.
     const mySupportCard = (B.mySupportChoiceId && B.mySupportChoiceId!=='__random__') ? findInHand(B.myHand, B.mySupportChoiceId) : null;
-    const mySupportTags = mySupportCard ? parseEffectTags(effectText(mySupportCard)) : [];
-    const oppSupportTags = (B.oppSupportRevealed && B.oppSupportRevealed.type!=='unknown') ? parseEffectTags(effectText(B.oppSupportRevealed)) : [];
+    const myRandomReveal = (B.mySupportChoiceId==='__random__') ? App._myRandomRevealCard : null;
+    const mySupportTags = mySupportCard ? parseEffectTags(effectText(mySupportCard)) : (myRandomReveal ? parseEffectTags(effectText(myRandomReveal)) : []);
+
+    const oppWasRandom = B.oppSupportRevealed && B.oppSupportRevealed.type==='unknown';
+    const oppRandomReveal = oppWasRandom ? App._oppRandomRevealCard : null;
+    const oppSupportTags = (B.oppSupportRevealed && !oppWasRandom) ? parseEffectTags(effectText(B.oppSupportRevealed)) : (oppRandomReveal ? parseEffectTags(effectText(oppRandomReveal)) : []);
 
     let unknownNote = '';
     if(oppAtk==='__unknown__'){
@@ -983,14 +1081,29 @@ const App = {
     const cell = computeCell(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppAtk, mySupportTags, oppSupportTags, 0, iAmTurnPlayer);
     B.oppHp = Math.max(0, B.oppHp - cell.myDmg);
     B.myHp = Math.max(0, B.myHp - cell.oppDmg);
+    // HP-modifying effects (heals are typically confirmed permanent; applied after the damage exchange).
+    if(cell.myHalve) B.myHp = Math.floor(B.myHp/2);
+    if(cell.oppHalve) B.oppHp = Math.floor(B.oppHp/2);
+    if(cell.myHealAmt) B.myHp += cell.myHealAmt;
+    if(cell.oppHealAmt) B.oppHp += cell.oppHealAmt;
     if(mySupportCard) removeFromHand(mySupportCard._uid||mySupportCard.id);
 
-    const mySupportLabel = B.mySupportChoiceId==='__random__' ? ' + random card (unknown effect)' : (mySupportCard?' + '+mySupportCard.name:'');
-    const oppSupportLabel = B.oppSupportRevealed ? ' + '+B.oppSupportRevealed.name+(B.oppSupportRevealed.type==='unknown'?' (unknown effect)':'') : '';
-    logEvent(`You: ${B.myLockedAtk.toUpperCase()} (${cell.myDmg} dmg)${mySupportLabel} vs Opponent: ${oppAtk.toUpperCase()} (${cell.oppDmg} dmg)${oppSupportLabel}${unknownNote}. HP now You ${B.myHp} / Opp ${B.oppHp}.`);
-    if(B.mySupportChoiceId==='__random__' || (B.oppSupportRevealed && B.oppSupportRevealed.type==='unknown')){
-      logEvent(`Note: a random/unknown card was played this bout — its effect wasn't modeled, so the damage above may not reflect what actually happened in-game.`);
+    const mySupportLabel = mySupportCard ? ' + '+mySupportCard.name : (myRandomReveal ? ' + random card (revealed: '+myRandomReveal.name+')' : (B.mySupportChoiceId==='__random__' ? ' + random card (unknown effect)' : ''));
+    const oppSupportLabel = B.oppSupportRevealed ? ' + '+(oppRandomReveal ? 'random card (revealed: '+oppRandomReveal.name+')' : B.oppSupportRevealed.name+(oppWasRandom?' (unknown effect)':'')) : '';
+    let hpEffectNote = '';
+    if(cell.myHealAmt || cell.oppHealAmt || cell.myHalve || cell.oppHalve){
+      const parts = [];
+      if(cell.myHealAmt) parts.push(`you recovered ${cell.myHealAmt} HP`);
+      if(cell.oppHealAmt) parts.push(`opponent recovered ${cell.oppHealAmt} HP`);
+      if(cell.myHalve) parts.push(`your HP was halved`);
+      if(cell.oppHalve) parts.push(`opponent's HP was halved`);
+      hpEffectNote = ' ('+parts.join(', ')+', applied and permanent)';
     }
+    logEvent(`You: ${B.myLockedAtk.toUpperCase()} (${cell.myDmg} dmg)${mySupportLabel} vs Opponent: ${oppAtk.toUpperCase()} (${cell.oppDmg} dmg)${oppSupportLabel}${unknownNote}${hpEffectNote}. HP now You ${B.myHp} / Opp ${B.oppHp}.`);
+    if((B.mySupportChoiceId==='__random__' && !myRandomReveal) || (oppWasRandom && !oppRandomReveal)){
+      logEvent(`Note: a random/unknown card's identity is still unconfirmed — its effect wasn't modeled, so the damage above may not reflect what actually happened in-game.`);
+    }
+    App._myRandomRevealCard = null; App._oppRandomRevealCard = null;
 
     if(B.oppHp<=0 || B.myHp<=0){
       if(B.oppHp<=0 && B.myHp<=0){
