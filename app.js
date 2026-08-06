@@ -628,14 +628,33 @@ function bankingBonus(currentDp, ppGained){
   return Math.round(effective*1.2 + overflow*0.3);
 }
 
-function rankSacrificeOptions(myActive, myDpTotal, hand){
+// Digivolving resets your active to the new form's full HP -- so when your
+// current active is already low, banked DP isn't just progress toward a
+// bigger body someday, it's a live escape hatch from a likely KO next hit.
+// Scale the banking bonus up sharply as HP gets dangerous.
+function urgencyMultiplier(myHp, myMaxHp){
+  if(!myMaxHp || myHp==null) return 1;
+  const pct = myHp/myMaxHp;
+  if(pct<=0.15) return 3.0;
+  if(pct<=0.3) return 2.2;
+  if(pct<=0.5) return 1.5;
+  return 1.0;
+}
+
+function rankSacrificeOptions(myActive, myDpTotal, hand, myHp){
   const digimonCandidates = hand.filter(c=>c.type==='digimon');
   const results = [];
   const baselineEvo = myActive ? digivolveOptions(myActive, myDpTotal, hand) : [];
+  const urgency = myActive ? urgencyMultiplier(myHp, myActive.hp) : 1;
+  // Standing still has a real cost when you're endangered AND have no path to
+  // digivolve right now -- staying a fragile low-tier form while low on HP is
+  // itself a risk, not a neutral default.
+  const standStillPenalty = (!baselineEvo.length && urgency>1) ? Math.round(-20*urgency) : 0;
   results.push({
     id:'', name:'— sacrifice nothing —',
-    note: baselineEvo.length ? `You already have ${baselineEvo.length} eligible digivolve target(s) at your current ${myDpTotal} DP.` : `No eligible digivolve targets yet at your current ${myDpTotal} DP.`,
-    score: 0
+    note: baselineEvo.length ? `You already have ${baselineEvo.length} eligible digivolve target(s) at your current ${myDpTotal} DP.` :
+      (standStillPenalty ? `No eligible digivolve targets, and your HP is low enough that staying put carries real risk (${standStillPenalty} for doing nothing).` : `No eligible digivolve targets yet at your current ${myDpTotal} DP.`),
+    score: standStillPenalty
   });
 
   digimonCandidates.forEach(card=>{
@@ -653,10 +672,13 @@ function rankSacrificeOptions(myActive, myDpTotal, hand){
       score += 200;
       note += ` Unlocks digivolving into ${newlyUnlocked.map(e=>e.name).join(', ')} THIS turn.`;
     } else {
-      const bonus = bankingBonus(myDpTotal, card.pp||0);
+      const baseBonus = bankingBonus(myDpTotal, card.pp||0);
+      const bonus = Math.round(baseBonus * urgency);
       if(bonus>0){
         score += bonus;
-        note += ` No immediate target, but banks progress toward a future digivolve (+${bonus} banking value).`;
+        note += urgency>1
+          ? ` No immediate target, but your HP is low enough that banked DP is a real escape hatch — digivolving refreshes to full HP (+${bonus} urgent banking value, ${urgency}x).`
+          : ` No immediate target, but banks progress toward a future digivolve (+${bonus} banking value).`;
       }
     }
     if(eff.notes.length) note += ' Giving up: ' + eff.notes.join(' ');
@@ -670,7 +692,7 @@ function renderDpPhase(el){
   const active = activeFor(B.turnPlayer);
   const dpTotal = isMe ? B.myDpTotal : B.oppDpTotal;
   const evoOptions = (isMe && active) ? digivolveOptions(active, dpTotal, B.myHand) : [];
-  const sacRanked = (isMe && active) ? rankSacrificeOptions(active, dpTotal, B.myHand) : [];
+  const sacRanked = (isMe && active) ? rankSacrificeOptions(active, dpTotal, B.myHand, B.myHp) : [];
   const oppEvoPreview = (!isMe && active) ? digivolveOptions(active, dpTotal, B.oppHand) : [];
   const speedCard = (isMe && active) ? findSpeedDigivolveCard(B.myHand) : null;
   const speedOptions = speedCard ? speedDigivolveOptions(active, B.myHand.filter(c=>c._uid!==speedCard._uid)) : [];
