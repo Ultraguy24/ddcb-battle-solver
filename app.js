@@ -436,7 +436,7 @@ function cardMiniPreview(card, hp){
   if(!card) return `<div class="small-note">Not chosen yet.</div>`;
   return `
     <div class="card-preview">
-      <div class="name">${card.name} <span class="badge ${specClass(card.sp)}">${card.sp}</span> <span class="badge" style="border-color:#333;color:#9db">${card.lvl}</span></div>
+      <div class="name">${card.name} <span class="badge ${specClass(card.sp)}">${card.sp}</span> <span class="badge" style="background:#000080;border-color:#000">${card.lvl}</span></div>
       <div>HP ${hp} / ${card.hp}</div>
       ${hpBar(hp, card.hp)}
       <div class="atk-grid">
