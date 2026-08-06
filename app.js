@@ -613,6 +613,21 @@ function renderEntrancePhase(el){
   wireSearchBox('entranceInput', {type:'digimon'}, (card)=> applyEntranceSelection(card));
 }
 
+// DP banked now isn't wasted just because nothing in hand can spend it THIS
+// turn -- it still moves you toward whatever you draw next. Weighted toward a
+// typical Champion-tier cost (based on observed data), tapering off once
+// you're already past that threshold since the marginal value of extra
+// banked DP drops once you can already afford most things.
+function bankingBonus(currentDp, ppGained){
+  if(ppGained<=0) return 0;
+  const benchmark = 30;
+  if(currentDp >= benchmark) return Math.round(ppGained*0.3);
+  const remaining = benchmark - currentDp;
+  const effective = Math.min(ppGained, remaining);
+  const overflow = Math.max(0, ppGained-remaining);
+  return Math.round(effective*1.2 + overflow*0.3);
+}
+
 function rankSacrificeOptions(myActive, myDpTotal, hand){
   const digimonCandidates = hand.filter(c=>c.type==='digimon');
   const results = [];
@@ -637,6 +652,12 @@ function rankSacrificeOptions(myActive, myDpTotal, hand){
     if(newlyUnlocked.length){
       score += 200;
       note += ` Unlocks digivolving into ${newlyUnlocked.map(e=>e.name).join(', ')} THIS turn.`;
+    } else {
+      const bonus = bankingBonus(myDpTotal, card.pp||0);
+      if(bonus>0){
+        score += bonus;
+        note += ` No immediate target, but banks progress toward a future digivolve (+${bonus} banking value).`;
+      }
     }
     if(eff.notes.length) note += ' Giving up: ' + eff.notes.join(' ');
     results.push({ id:String(card._uid||card.id), name:card.name, note, score });
