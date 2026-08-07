@@ -820,9 +820,12 @@ function renderAttackPhase(el){
   if(B.atkStep==='myReactiveSupport'){
     const oppTags = B.oppSupportRevealed ? parseEffectTags(effectText(B.oppSupportRevealed)) : [];
     const ranked = rankSupportOptions(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, B.myHand, oppTags, 0, iAmTurnPlayer);
+    const redirectTag = oppTags.find(t=>t.type==='redirectOtherAttackValue');
+    const redirectWarning = redirectTag ? `<div class="warn-box">${B.oppSupportRevealed.name} redirects your locked ${B.myLockedAtk.toUpperCase()} to use <b>${redirectTag.map[B.myLockedAtk].toUpperCase()}'s damage number</b> instead. Any support you pick that boosts/doubles "${B.myLockedAtk.toUpperCase()}" still applies — it checks which button you pressed, not which number came out — so it's scored against the redirected value below, not wasted.</div>` : '';
     el.innerHTML = `
       <h2>▸ YOUR SUPPORT (REACTING)</h2>
       <div class="small-note">You locked ${B.myLockedAtk.toUpperCase()}. Opponent's support: <b>${B.oppSupportRevealed?B.oppSupportRevealed.name:'none'}</b>. Ranked by worst-case outcome against their 3 possible attacks:</div>
+      ${redirectWarning}
       ${ranked.map((r,i)=>`
         <div class="suggestion-rank ${i===0?'top':''}">
           <span>${r.name}</span>
@@ -1105,6 +1108,18 @@ const App = {
     const oppRandomReveal = oppWasRandom ? App._oppRandomRevealCard : null;
     const oppSupportTags = (B.oppSupportRevealed && !oppWasRandom) ? parseEffectTags(effectText(B.oppSupportRevealed)) : (oppRandomReveal ? parseEffectTags(effectText(oppRandomReveal)) : []);
 
+    // Labels the button actually pressed alongside any redirect that changed
+    // which NUMBER got used -- e.g. "O (redirected to T's value)" -- so the
+    // log never silently shows "O" when the real damage came from elsewhere.
+    function attackLabel(chosenAtk, isMine){
+      const relevantTags = isMine ? oppSupportTags : mySupportTags; // redirects always come from the OTHER side's card
+      const redirect = relevantTags.find(t=>t.type==='redirectOtherAttackValue');
+      if(redirect && redirect.map[chosenAtk]){
+        return chosenAtk.toUpperCase()+' (redirected to '+redirect.map[chosenAtk].toUpperCase()+"'s value)";
+      }
+      return chosenAtk.toUpperCase();
+    }
+
     let unknownNote = '';
     if(oppAtk==='__unknown__'){
       const options = ['o','t','x'].map(b=>computeCell(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, b, mySupportTags, oppSupportTags, 0, iAmTurnPlayer));
@@ -1142,7 +1157,7 @@ const App = {
       if(cell.oppHalve) parts.push(`opponent's HP was halved`);
       hpEffectNote = ' ('+parts.join(', ')+', applied and permanent)';
     }
-    logEvent(`You: ${B.myLockedAtk.toUpperCase()} (${cell.myDmg} dmg)${mySupportLabel} vs Opponent: ${oppAtk.toUpperCase()} (${cell.oppDmg} dmg)${oppSupportLabel}${unknownNote}${hpEffectNote}. HP now You ${B.myHp} / Opp ${B.oppHp}.`);
+    logEvent(`You: ${attackLabel(B.myLockedAtk, true)} (${cell.myDmg} dmg)${mySupportLabel} vs Opponent: ${attackLabel(oppAtk, false)} (${cell.oppDmg} dmg)${oppSupportLabel}${unknownNote}${hpEffectNote}. HP now You ${B.myHp} / Opp ${B.oppHp}.`);
     if((B.mySupportChoiceId==='__random__' && !myRandomReveal) || (oppWasRandom && !oppRandomReveal)){
       logEvent(`Note: a random/unknown card's identity is still unconfirmed — its effect wasn't modeled, so the damage above may not reflect what actually happened in-game.`);
     }
