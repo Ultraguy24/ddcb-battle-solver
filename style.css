@@ -3,7 +3,7 @@
   --shadow:#808080; --darkshadow:#000000; --desktop:#008080;
   --titlebar-l:#000080; --titlebar-r:#1084d0; --titlebar-text:#ffffff;
   --select-bg:#000080; --select-text:#ffffff; --text:#000000; --textdim:#3a3a3a;
-  --fire:#aa0000; --water:#0000aa; --nature:#006600; --dark:#550080; --rare:#8a6d00; --armor:#006666;
+  --fire:#aa0000; --water:#0000aa; --nature:#006600; --dark:#550080; --mystery:#8a6d00; --armor:#006666;
   --red:#aa0000; --amber:#7a5a00; --cyan:#000080;
 }
 *{box-sizing:border-box;}
@@ -101,7 +101,7 @@ select:focus,input:focus,textarea:focus{ outline:1px dotted var(--text); outline
 .spec-water{background:var(--water);}
 .spec-nature{background:var(--nature);}
 .spec-darkness{background:var(--dark);}
-.spec-rare{background:var(--rare);}
+.spec-mystery{background:var(--mystery);}
 .spec-partner{background:var(--armor);}
 
 .atk-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:6px;}
