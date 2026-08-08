@@ -59,7 +59,7 @@
           <div><label>NAME</label><input id="ef-name"></div>
           <div><label>LEVEL (R/C/U/A)</label><input id="ef-lvl"></div>
           <div><label>SPECIALTY</label>
-            <select id="ef-spec"><option>Fire</option><option>Water</option><option>Nature</option><option>Darkness</option><option>Rare</option><option>Partner</option></select>
+            <select id="ef-spec"><option>Fire</option><option>Water</option><option>Nature</option><option>Darkness</option><option>Mystery</option><option>Partner</option></select>
           </div>
         </div>
         <div class="grid3">
@@ -105,6 +105,37 @@
       <h2>▸ FILES IN THIS FOLDER</h2>
       <div class="assumptions">
         <b>index.html</b> — page structure only.<br>
+        <b>style.css</b> — all visual styling.<br>
+        <b>app.js</b> — all game logic: the solver math, the phase-by-phase battle flow, and the card database tab.<br>
+        <b>cards.json</b> — every card (Digimon + Option), as plain editable JSON. Edit it directly to correct data, add the cards still missing, or reorder entries to match your in-game card list — the app just reads whatever order is in the file.<br><br>
+        <b>Important:</b> if you open <code>index.html</code> by double-clicking it, Chrome/Edge will block the <code>fetch('cards.json')</code> call due to local-file CORS rules, and you'll see a red error banner. Either use Firefox (which allows it), or run a tiny local server from this folder:
+        <br><code>python3 -m http.server 8000</code> then open <code>http://localhost:8000/index.html</code>.
+      </div>
+    </div>
+    <div class="panel">
+      <h2>▸ HOW THE BATTLE FLOW WORKS</h2>
+      <div class="assumptions">
+        <b>Turns are sequential, not simultaneous.</b> One player runs their whole turn (Entrance if they have no active → DP Phase → digivolve check), then the turn passes to the other player. The <b>Attack Phase only happens if both sides currently have an active</b> — otherwise it's skipped and play passes on.<br><br>
+        <b>Kickoff</b> — tell the tool who won the random first-turn draw. This matters a lot: the turn player attacks first by default every bout, and also gets to commit their support card <i>second</i>, reacting to what the non-turn player already revealed.<br><br>
+        <b>Entrance</b> — pick the active Digimon for whichever side's turn it is. Entering directly with a Champion or Ultimate (instead of digivolving up to it later) automatically halves that card's HP and all three attacks — the tool applies this for you.<br><br>
+        <b>DP Phase</b> — the turn player may sacrifice one hand card for DP, <i>or</i> digivolve using already-banked DP, but never both in the same turn. DP totals persist across the whole duel.<br><br>
+        <b>Attack Phase</b> — both sides pick an attack blind. Then support is revealed in a fixed order: the <b>non-turn player commits first</b>, and the <b>turn player reacts second</b> with full knowledge of that. The tool splits this into the right steps depending on whose turn it is, and ranks your hand's support options (including "none") by worst-case outcome at each step.<br><br>
+        <b>Opponent's hand is visible</b> in this game, so track it in the "Opponent's Hand" box just like your own. This upgrades the non-turn-player support commitment from a guess into a true worst-case calculation: instead of padding their damage with an assumed buffer, the tool checks every attack × every real support card actually in their tracked hand and finds the genuine worst case. Keep it accurate — an empty tracked hand is treated as "they have nothing," which will overstate how safe a pick is if you just haven't logged their cards yet.<br><br>
+        <b>Sacrifice/digivolve are not mutually exclusive</b> — you can do both in the same DP phase. The Sacrifice Advisor accounts for this: sacrificing a specific card gets a large bonus if doing so would immediately unlock a digivolve target already sitting in your hand this same turn.<br><br>
+        <b>Damage resolution:</b> the turn player's attack lands first by default. If it KOs the opponent, their attack never happens. A card's own "1st attack" trait (or an unconditional "Attack first" support effect) only matters for the <i>non-turn</i> player — it's how they steal that order away. If <i>both</i> sides have a "1st attack" trait active, the turn player's own copy voids the non-turn player's steal attempt, so the turn player still goes first — confirmed against the game's own help text.<br><br>
+        <b>What's auto-modeled</b> (verified against the in-game X-effect descriptions): base attack values; "&lt;Specialty&gt; foe x3"-style Cross bonuses; "O/T/X to 0" negation; "O/T/X Counter" (the opponent's matching attack misses and you reflect back with <i>their own</i> power at that attack — that's why counter cards print X:0, since a plain Cross without the right opponent attack just whiffs); "Crash" (your Cross damage becomes your current HP, then your HP becomes exactly 10 as the cost); "Eat-up HP" (Cross heals you for exactly the damage it deals); "Jamming" (voids the opponent's Digimon-card support effect for the bout — not Option cards); turn-order-based first strike with the tiebreak above; "force both players to attack X" support effects; and common Option/support numeric effects (flat boosts, attack-specific boosts, attack doubling, attack zeroing, healing).<br>
+        <b>What's shown as text only:</b> discards, specialty swaps, and anything conditional on hidden information — these get flagged so you can factor them in yourself.
+      </div>
+    </div>
+  </div>
+</div>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>        <b>index.html</b> — page structure only.<br>
         <b>style.css</b> — all visual styling.<br>
         <b>app.js</b> — all game logic: the solver math, the phase-by-phase battle flow, and the card database tab.<br>
         <b>cards.json</b> — every card (Digimon + Option), as plain editable JSON. Edit it directly to correct data, add the cards still missing, or reorder entries to match your in-game card list — the app just reads whatever order is in the file.<br><br>
