@@ -60,10 +60,11 @@ function wordToAtk(w){
   if(w.startsWith('x') || w.startsWith('cross')) return 'x';
   return null;
 }
+const SPEC_NAME_MAP = {fire:'Fire', water:'Water', nature:'Nature', darkness:'Darkness', rare:'Mystery', mystery:'Mystery'};
 function parseFoeMultiplier(xt){
-  const m = /^(fire|water|nature|darkness|rare)\s+foe\s+x(\d+)$/i.exec((xt||"").trim());
+  const m = /^(fire|water|nature|darkness|rare|mystery)\s+foe\s+x(\d+)$/i.exec((xt||"").trim());
   if(!m) return null;
-  return { spec: m[1][0].toUpperCase()+m[1].slice(1).toLowerCase(), mult: parseInt(m[2]) };
+  return { spec: SPEC_NAME_MAP[m[1].toLowerCase()], mult: parseInt(m[2]) };
 }
 function parseNegateTag(xt){
   const m = /^(O|T|X)\s+to\s+0$/i.exec((xt||"").trim());
@@ -71,6 +72,25 @@ function parseNegateTag(xt){
 }
 function isFirstStrikeXTag(xt){ return /^1st attack$/i.test((xt||"").trim()); }
 function baseVal(card, atk){ return atk==='o'?card.o: atk==='t'?card.t: card.x; }
+
+// Full official description: "If Opponent uses [X] Attack, it will miss. Then
+// you counter with opponent's [X] attack power." Triggers when THIS card's
+// owner presses Cross and the opponent happens to pick the matching attack --
+// their hit is negated and replaced with a reflect using THEIR OWN stat at
+// that attack type (which is why counter cards are always printed with X:0 --
+// the plain Cross whiff is the fallback when the condition isn't met).
+function parseCounterTag(xt){
+  const m = /^(O|T|X)\s+counter$/i.exec((xt||"").trim()) || /^counter\s+(O|T|X)$/i.exec((xt||"").trim());
+  return m ? m[1].toUpperCase() : null;
+}
+// "Attack Power becomes same as HP. HP becomes 10." -- own Cross damage is
+// replaced by current HP, then HP is set to exactly 10 after the bout resolves.
+function isCrashXTag(xt){ return /^crash$/i.test((xt||"").trim()); }
+// "Recover the same amount of HP as the damage inflicted" -- lifesteal on Cross.
+function isEatUpHpXTag(xt){ return /^eat[\s-]?up hp$/i.test((xt||"").trim()); }
+// "Opponent's Support Effect is Voided. Can't Void Option Effect." -- voids
+// the opponent's DIGIMON-card support effect specifically, not Option cards.
+function xtGrantsJamming(xt){ return /^jamming$/i.test((xt||"").trim()); }
 
 function effectiveDamage(attacker, atkKey, defender, valueKey){
   const vk = valueKey || atkKey;
@@ -92,8 +112,9 @@ function activeGrantsFirstStrike(card, atk){
   return false;
 }
 
-function parseEffectTags(text){
+function parseEffectTags(text, card){
   const tags = []; if(!text) return tags;
+  const fromOption = !!(card && card.type==='option');
   let m;
   if(m = /Own\s+(O|T|X|Circle|Triangle|Cross)\s+[Aa]ttack power is doubled/i.exec(text)){
     tags.push({type:'doubleOwnAttack', attack:wordToAtk(m[1])});
@@ -105,6 +126,268 @@ function parseEffectTags(text){
     tags.push({type:'boostOwnAttackSpecific', attack:wordToAtk(m[1]), amount:parseInt(m[2])});
   } else if(m = /(?:Boost|Reduce) own attack power\s*([+-]\d+)/i.exec(text)){
     tags.push({type:'boostOwnAttack', amount:parseInt(m[1])});
+  }
+  if(m = /Recover own HP by\s*\+?(\d+)/i.exec(text)){
+    tags.push({type:'healSelf', amount:parseInt(m[1])});
+  }
+  if(m = /Recover foe'?s HP by\s*\+?(\d+)/i.exec(text)){
+    tags.push({type:'healOpp', amount:parseInt(m[1])});
+  }
+  if(/Own HP are halved/i.test(text)) tags.push({type:'halveSelfHp'});
+  if(/Opponent'?s HP are halved/i.test(text)) tags.push({type:'halveOppHp'});
+  const hasSpecificAttackWord = /Own\s+(O|T|X|Circle|Triangle|Cross)\s+[Aa]ttack/i.test(text);
+  if(/own attack power is tripled/i.test(text) && !hasSpecificAttackWord) tags.push({type:'multiplyOwnAttack', mult:3});
+  if(/own attack power is doubled/i.test(text) && !hasSpecificAttackWord) tags.push({type:'multiplyOwnAttack', mult:2});
+  if(/^Attack first\.?$/i.test(text.trim())) tags.push({type:'firstStrike'});
+  if(/Forces? both players? (?:to use|to choose)\s*(O|T|X|Circle|Triangle|Cross)/i.exec(text) || /Both players use\s*(O|T|X)/i.exec(text)){
+    const mm = /Forces? both players? (?:to use|to choose)\s*(O|T|X|Circle|Triangle|Cross)/i.exec(text) || /Both players use\s*(O|T|X)/i.exec(text);
+    tags.push({type:'forceBothAttack', attack:wordToAtk(mm[1])});
+  }
+  if(m = /Own attack becomes\s*(O|T|X|Circle|Triangle|Cross)/i.exec(text)){
+    tags.push({type:'lockOwnAttack', attack:wordToAtk(m[1])});
+  } else if(m = /(O|T|X)\s+and\s+(O|T|X)\s+[Aa]ttack power (?:are|is|becomes) 0/i.exec(text)){
+    const mentioned = [wordToAtk(m[1]), wordToAtk(m[2])];
+    const locked = ['o','t','x'].find(a=>!mentioned.includes(a));
+    if(locked) tags.push({type:'lockOwnAttack', attack:locked});
+  }
+  if(/Opponent'?s attack changes/i.test(text)){
+    // Confirmed by play: this swaps only which damage NUMBER is used, not which
+    // button was pressed -- own X/T/O-triggered abilities still key off the
+    // original chosen attack, not the redirected one. (Disrupt Ray: O->T, T->X, X->O)
+    tags.push({type:'redirectOtherAttackValue', map:{o:'t', t:'x', x:'o'}});
+  }
+  // Common "if both attacks are the same/different" conditional prefix --
+  // applies to whatever effect(s) the rest of the sentence produced above.
+  let condition = null;
+  if(/If both (?:players'? )?attacks? (?:are|is) different/i.test(text)) condition = 'attacksDiffer';
+  else if(/If both (?:players'? )?(?:attacks?|use the same attack)/i.test(text) && /same/i.test(text)) condition = 'attacksSame';
+  if(condition) tags.forEach(t=>{ t.condition = condition; });
+  tags.forEach(t=>{ t.fromOption = fromOption; });
+  return tags;
+}
+
+function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSupportTags, hiddenBuffer, iAmTurnPlayer){
+  mySupportTags = mySupportTags||[]; oppSupportTags = oppSupportTags||[]; hiddenBuffer = hiddenBuffer||0;
+  const origA = a, origB = b;
+  function conditionMet(tag){
+    if(!tag.condition) return true;
+    if(tag.condition==='attacksDiffer') return origA !== origB;
+    if(tag.condition==='attacksSame') return origA === origB;
+    return true;
+  }
+  mySupportTags = mySupportTags.filter(conditionMet);
+  oppSupportTags = oppSupportTags.filter(conditionMet);
+
+  // Jamming: "Opponent's Support Effect is Voided. Can't Void Option Effect."
+  // Only triggers when its owner presses Cross, like every other xt ability.
+  if(a==='x' && xtGrantsJamming(myCard.xt)){
+    oppSupportTags = oppSupportTags.filter(t=>t.fromOption);
+  }
+  if(b==='x' && xtGrantsJamming(oppCard.xt)){
+    mySupportTags = mySupportTags.filter(t=>t.fromOption);
+  }
+
+  mySupportTags.concat(oppSupportTags).forEach(tag=>{
+    if(tag.type==='forceBothAttack'){ a = tag.attack; b = tag.attack; }
+  });
+  mySupportTags.forEach(tag=>{ if(tag.type==='lockOwnAttack'){ a = tag.attack; } });
+  oppSupportTags.forEach(tag=>{ if(tag.type==='lockOwnAttack'){ b = tag.attack; } });
+
+  // Value-only redirects (e.g. Disrupt Ray): change which damage NUMBER is used
+  // without changing which attack was actually "pressed" -- own-attack-triggered
+  // abilities (negation, foe multipliers, first strike) still key off a/b as-is.
+  let aVal = a, bVal = b;
+  mySupportTags.forEach(tag=>{ if(tag.type==='redirectOtherAttackValue'){ bVal = tag.map[b]; } });
+  oppSupportTags.forEach(tag=>{ if(tag.type==='redirectOtherAttackValue'){ aVal = tag.map[a]; } });
+
+  // Counter Attack: "If Opponent uses [X] Attack, it will miss. Then you
+  // counter with opponent's [X] attack power." Only live when its owner
+  // presses Cross (hence these cards print X:0 -- that's the whiff fallback
+  // when the opponent doesn't pick the matching attack).
+  const myCounter = a==='x' ? parseCounterTag(myCard.xt) : null;
+  const oppCounter = b==='x' ? parseCounterTag(oppCard.xt) : null;
+  const myCountering = myCounter && myCounter.toLowerCase()===b;
+  const oppCountering = oppCounter && oppCounter.toLowerCase()===a;
+
+  // Crash: "Attack Power becomes same as HP. HP becomes 10."
+  const myCrashing = a==='x' && isCrashXTag(myCard.xt);
+  const oppCrashing = b==='x' && isCrashXTag(oppCard.xt);
+
+  let myDmg = myCountering ? baseVal(oppCard, b) : (myCrashing ? myHp : effectiveDamage(myCard, a, oppCard, aVal));
+  let oppDmg = oppCountering ? baseVal(myCard, a) : (oppCrashing ? oppHp : effectiveDamage(oppCard, b, myCard, bVal));
+
+  mySupportTags.forEach(tag=>{
+    if(tag.type==='boostOwnAttack') myDmg += tag.amount;
+    if(tag.type==='boostOwnAttackSpecific' && tag.attack===a) myDmg += tag.amount;
+    if(tag.type==='doubleOwnAttack' && tag.attack===a) myDmg *= 2;
+    if(tag.type==='multiplyOwnAttack') myDmg *= tag.mult;
+    if(tag.type==='zeroOppAttack' && (!tag.attack || tag.attack===b)) oppDmg = 0;
+  });
+  oppSupportTags.forEach(tag=>{
+    if(tag.type==='boostOwnAttack') oppDmg += tag.amount;
+    if(tag.type==='boostOwnAttackSpecific' && tag.attack===b) oppDmg += tag.amount;
+    if(tag.type==='doubleOwnAttack' && tag.attack===b) oppDmg *= 2;
+    if(tag.type==='multiplyOwnAttack') oppDmg *= tag.mult;
+    if(tag.type==='zeroOppAttack' && (!tag.attack || tag.attack===a)) myDmg = 0;
+  });
+
+  if(myCountering) oppDmg = 0; // their matching attack "misses"
+  if(oppCountering) myDmg = 0;
+  if(a==='x'){ const neg=parseNegateTag(myCard.xt); if(neg && neg.toLowerCase()===b) oppDmg=0; }
+  if(b==='x'){ const neg=parseNegateTag(oppCard.xt); if(neg && neg.toLowerCase()===a) myDmg=0; }
+
+  myDmg = Math.max(0, Math.round(myDmg));
+  oppDmg = Math.max(0, Math.round(oppDmg));
+
+  // First-strike: the turn player goes first by default. The non-turn player
+  // can steal that only if the turn player does NOT also have a "1st Attack"
+  // trait -- per the official text, having it yourself voids a foe's steal
+  // attempt even though it's otherwise redundant for whoever already goes first.
+  const iCanSteal = activeGrantsFirstStrike(myCard, a) || mySupportTags.some(t=>t.type==='firstStrike');
+  const oppCanSteal = activeGrantsFirstStrike(oppCard, b) || oppSupportTags.some(t=>t.type==='firstStrike');
+  let myGoesFirst;
+  if(iAmTurnPlayer===undefined || iAmTurnPlayer===null){
+    myGoesFirst = iCanSteal && !oppCanSteal ? true : (!iCanSteal && oppCanSteal ? false : null);
+  } else {
+    const turnPlayerHasFirst = iAmTurnPlayer ? iCanSteal : oppCanSteal;
+    const nonTurnPlayerHasFirst = iAmTurnPlayer ? oppCanSteal : iCanSteal;
+    const turnPlayerGoesFirst = !(nonTurnPlayerHasFirst && !turnPlayerHasFirst);
+    myGoesFirst = iAmTurnPlayer ? turnPlayerGoesFirst : !turnPlayerGoesFirst;
+  }
+
+  if(myGoesFirst===true){
+    if(myDmg>=oppHp) oppDmg=0;
+  } else if(myGoesFirst===false){
+    if(oppDmg>=myHp) myDmg=0;
+  }
+
+  if(hiddenBuffer) oppDmg += hiddenBuffer;
+
+  // HP-modifying effects (healing, halving, Crash's HP-to-10, Eat-up-HP
+  // lifesteal) -- these change actual HP totals, separate from the damage
+  // swing used for solver ranking. The resolver applies these to real HP.
+  let myHealAmt = 0, oppHealAmt = 0, myHalve = false, oppHalve = false;
+  let mySetHp = null, oppSetHp = null;
+  mySupportTags.forEach(tag=>{
+    if(tag.type==='healSelf') myHealAmt += tag.amount;
+    if(tag.type==='healOpp') oppHealAmt += tag.amount;
+    if(tag.type==='halveSelfHp') myHalve = true;
+    if(tag.type==='halveOppHp') oppHalve = true;
+  });
+  oppSupportTags.forEach(tag=>{
+    if(tag.type==='healSelf') oppHealAmt += tag.amount;
+    if(tag.type==='healOpp') myHealAmt += tag.amount;
+    if(tag.type==='halveSelfHp') oppHalve = true;
+    if(tag.type==='halveOppHp') myHalve = true;
+  });
+  if(a==='x' && isEatUpHpXTag(myCard.xt)) myHealAmt += myDmg;
+  if(b==='x' && isEatUpHpXTag(oppCard.xt)) oppHealAmt += oppDmg;
+  if(myCrashing) mySetHp = 10;
+  if(oppCrashing) oppSetHp = 10;
+
+  return { myDmg, oppDmg, koOpp: myDmg>=oppHp, koMe: oppDmg>=myHp, myHealAmt, oppHealAmt, myHalve, oppHalve, mySetHp, oppSetHp };
+}
+
+function computeMatrix(myCard, oppCard, myHp, oppHp, mySupportTags, hiddenBuffer, iAmTurnPlayer){
+  const atks=['o','t','x'];
+  const grid = {};
+  atks.forEach(a=>{ grid[a]={}; atks.forEach(b=>{
+    grid[a][b] = computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, [], hiddenBuffer, iAmTurnPlayer);
+  }); });
+  return grid;
+}
+function maximin(grid){
+  const atks=['o','t','x'];
+  let best=null, bestVal=-Infinity;
+  atks.forEach(a=>{
+    let worst=Infinity;
+    atks.forEach(b=>{ const net = grid[a][b].myDmg - grid[a][b].oppDmg; if(net<worst) worst=net; });
+    if(worst>bestVal){ bestVal=worst; best=a; }
+  });
+  return {best, bestVal};
+}
+
+function rankSupportOptions(myCard, oppCard, myHp, oppHp, fixedA, hand, oppSupportTagsKnown, hiddenBuffer, iAmTurnPlayer){
+  const candidates = [{id:'', name:'— none —', tags:[]}].concat(
+    hand.map(c=>({id:String(c._uid||c.id), name:c.name + (c.type==='option'?' (option)':''), tags:parseEffectTags(effectText(c), c)}))
+  );
+  return candidates.map(cand=>{
+    let worst = Infinity;
+    ['o','t','x'].forEach(b=>{
+      const cell = computeCell(myCard, oppCard, myHp, oppHp, fixedA, b, cand.tags, oppSupportTagsKnown||[], hiddenBuffer||0, iAmTurnPlayer);
+      const net = cell.myDmg - cell.oppDmg;
+      if(net<worst) worst = net;
+    });
+    return { id:cand.id, name:cand.name, worst };
+  }).sort((x,y)=>y.worst-x.worst);
+}
+
+function halveToNearestTen(val){ return Math.floor(val/20)*10; }
+
+function adjustForEntrance(card){
+  if(card.lvl==='C' || card.lvl==='U'){
+    return Object.assign({}, card, {
+      hp:halveToNearestTen(card.hp), o:halveToNearestTen(card.o), t:halveToNearestTen(card.t), x:halveToNearestTen(card.x), _halved:true
+    });
+  }
+  return Object.assign({}, card, {_halved:false});
+}
+
+function effectQualityNote(card){
+  let score = 0; const notes = [];
+  const xt = (card.xt||'').trim();
+  const counterLetter = parseCounterTag(xt);
+  if(parseNegateTag(xt)){ score+=150; notes.push(`Cross negates the opponent's ${parseNegateTag(xt)} entirely.`); }
+  else if(counterLetter){ score+=90; notes.push(`Cross counters the opponent's ${counterLetter} specifically — negates it and reflects their own ${counterLetter} power back at them (whiffs otherwise, hence X:0).`); }
+  else if(isFirstStrikeXTag(xt)){ score+=100; notes.push('Cross grants first-attack priority (valuable if you end up as the non-turn player).'); }
+  else if(parseFoeMultiplier(xt)){ const fm=parseFoeMultiplier(xt); score+=50; notes.push(`Cross triples damage vs ${fm.spec} opponents (situational).`); }
+  else if(isEatUpHpXTag(xt)){ score+=70; notes.push('Cross heals you for exactly the damage it deals (lifesteal).'); }
+  else if(isCrashXTag(xt)){ score+=40; notes.push('Cross deals damage equal to your current HP, then your HP becomes 10 — huge swing, huge risk.'); }
+  else if(xtGrantsJamming(xt)){ score+=45; notes.push("Cross voids the opponent's Digimon-card support effect this bout (not Option cards)."); }
+  else if(xt && xt.toLowerCase()!=='none'){ notes.push(`Cross effect: "${xt}" (situational, not auto-scored).`); }
+
+  const txt = effectText(card);
+  const supTags = parseEffectTags(txt, card);
+  supTags.forEach(t=>{
+    if(t.type==='zeroOppAttack'){ score+=100; notes.push('Support can zero an opponent attack outright.'); }
+    if(t.type==='doubleOwnAttack'){ score+=70; notes.push('Support can double one of its own attacks.'); }
+    if(t.type==='boostOwnAttack'){ score+=t.amount/5; notes.push(`Support boosts all attacks by +${t.amount}.`); }
+    if(t.type==='boostOwnAttackSpecific'){ score+=t.amount/8; notes.push(`Support boosts its ${(t.attack||'?').toUpperCase()} by +${t.amount}.`); }
+    if(t.type==='healSelf'){ score+=t.amount/6; notes.push(`Support heals +${t.amount} HP.`); }
+    if(t.type==='halveSelfHp'){ score-=80; notes.push('Support halves own HP — risky.'); }
+    if(t.type==='halveOppHp'){ score+=60; notes.push('Support halves opponent HP.'); }
+    if(t.type==='forceBothAttack'){ score+=20; notes.push(`Support forces both players onto ${(t.attack||'?').toUpperCase()} — situational.`); }
+  });
+  if(/draw \d* ?cards?/i.test(txt)){ score+=30; notes.push('Support draws a card — card advantage.'); }
+  return {score, notes};
+}
+
+function rankEntranceCandidates(hand, oppActive, oppHp){
+  const candidates = hand.filter(c=>c.type==='digimon').map(c=>adjustForEntrance(c));
+  return candidates.map(card=>{
+    const eff = effectQualityNote(card);
+    let matchupVal = null;
+    if(oppActive){
+      const grid = computeMatrix(card, oppActive, card.hp, (oppHp!=null?oppHp:oppActive.hp), [], 0, true);
+      matchupVal = maximin(grid).bestVal;
+    }
+    const avgAtk = Math.round((card.o+card.t+card.x)/3);
+    const heuristic = Math.round(card.hp/10 + avgAtk/5 + eff.score);
+    return { card, matchupVal, heuristic, notes:eff.notes, avgAtk };
+  }).sort((a,b)=>{
+    if(a.matchupVal!==null && b.matchupVal!==null) return b.matchupVal-a.matchupVal;
+    return b.heuristic-a.heuristic;
+  });
+}
+
+function rankSupportOptionsOpenInfo(myCard, oppCard, myHp, oppHp, fixedA, myHand, oppHandCards, iAmTurnPlayer){
+  const myCandidates = [{id:'', name:'— none —', tags:[]}].concat(
+    myHand.map(c=>({id:String(c._uid||c.id), name:c.name + (c.type==='option'?' (option)':''), tags:parseEffectTags(effectText(c), c)}))
+  );
+  const oppSupportCandidates = [[]].concat(
+    (oppHandCards||[]).map(c=>parseEffectTags(effectText(c), c))
+  );
+  return my    tags.push({type:'boostOwnAttack', amount:parseInt(m[1])});
   }
   if(m = /Recover own HP by\s*\+?(\d+)/i.exec(text)){
     tags.push({type:'healSelf', amount:parseInt(m[1])});
