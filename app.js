@@ -2,6 +2,8 @@ let SEED_CARDS = [];
 let cardOverrides = {};
 let customCards = [];
 let ALL_CARDS = [];
+let COLLECTION = {}; // {cardId: count}
+let DECKS = [null, null, null]; // up to 3 decks: {name, cards:{cardId:count}} or null
 
 function specClass(sp){ return "spec-"+ (sp||"partner").toLowerCase(); }
 function effectText(card){ return card.type==='option' ? (card.effect||'') : (card.note||''); }
@@ -35,10 +37,45 @@ async function loadCardJson(){
 async function loadStorage(){
   try{ const r = await window.storage.get('card_overrides'); if(r && r.value) cardOverrides = JSON.parse(r.value); }catch(e){ cardOverrides = {}; }
   try{ const r2 = await window.storage.get('custom_cards'); if(r2 && r2.value) customCards = JSON.parse(r2.value); }catch(e){ customCards = []; }
+  try{ const r3 = await window.storage.get('collection'); if(r3 && r3.value) COLLECTION = JSON.parse(r3.value); }catch(e){ COLLECTION = {}; }
+  try{ const r4 = await window.storage.get('decks'); if(r4 && r4.value) DECKS = JSON.parse(r4.value); }catch(e){ DECKS = [null,null,null]; }
   rebuildAllCards();
 }
 async function saveOverrides(){ try{ await window.storage.set('card_overrides', JSON.stringify(cardOverrides)); }catch(e){} }
 async function saveCustomCards(){ try{ await window.storage.set('custom_cards', JSON.stringify(customCards)); }catch(e){} }
+async function saveCollection(){ try{ await window.storage.set('collection', JSON.stringify(COLLECTION)); }catch(e){} }
+async function saveDecks(){ try{ await window.storage.set('decks', JSON.stringify(DECKS)); }catch(e){} }
+
+// Parses one line of pasted collection/deck text into {name, count}. Handles:
+//  "011 - Lv U - Type Fire - Meteormon - 1 Cards"   (in-game collection menu format)
+//  "2 Tyrannomon" / "Tyrannomon x2" / "Tyrannomon x 2"
+//  "1. Tyrannomon" (numbered deck list -- count implied as 1)
+//  "Tyrannomon"    (bare name -- count implied as 1)
+function parseCollectionLine(line){
+  line = line.trim();
+  if(!line) return null;
+  let m;
+  // in-game collection menu format: "011 - Lv U - Type Fire - Meteormon - 1 Cards"
+  // (also tolerates "N/A" fields for Option cards with no level/type)
+  if(/-\s*\d+\s*Cards?\s*$/i.exec(line)){
+    const parts = line.split(/\s*-\s*/).map(p=>p.trim()).filter(p=>p.length);
+    const countPart = parts[parts.length-1];
+    const namePart = parts[parts.length-2];
+    const cm = /(\d+)\s*Cards?/i.exec(countPart);
+    if(cm && namePart) return { name: namePart.replace(/\(Partner\)/i,'').trim(), count: parseInt(cm[1]) };
+  }
+  if(m = /^(\d+)\s*[.):]\s*(.+)$/.exec(line)){
+    // numbered list entry, e.g. "1. Tyrannomon" -- the number is a LIST INDEX not a count
+    return { name: m[2].replace(/\(Partner\)/i,'').trim(), count: 1 };
+  }
+  if(m = /^(.+?)\s*[x×]\s*(\d+)$/i.exec(line)){
+    return { name: m[1].replace(/\(Partner\)/i,'').trim(), count: parseInt(m[2]) };
+  }
+  if(m = /^(\d+)\s*[x×]?\s+(.+)$/i.exec(line)){
+    return { name: m[2].replace(/\(Partner\)/i,'').trim(), count: parseInt(m[1]) };
+  }
+  return { name: line.replace(/\(Partner\)/i,'').trim(), count: 1 };
+}
 
 function findCardByName(name){
   if(!name) return null;
@@ -60,9 +97,9 @@ function wordToAtk(w){
   if(w.startsWith('x') || w.startsWith('cross')) return 'x';
   return null;
 }
-const SPEC_NAME_MAP = {fire:'Fire', water:'Water', nature:'Nature', darkness:'Darkness', rare:'Mystery', mystery:'Mystery'};
+const SPEC_NAME_MAP = {fire:'Fire', water:'Water', nature:'Nature', darkness:'Darkness', rare:'Rare'};
 function parseFoeMultiplier(xt){
-  const m = /^(fire|water|nature|darkness|rare|mystery)\s+foe\s+x(\d+)$/i.exec((xt||"").trim());
+  const m = /^(fire|water|nature|darkness|rare)\s+foe\s+x(\d+)$/i.exec((xt||"").trim());
   if(!m) return null;
   return { spec: SPEC_NAME_MAP[m[1].toLowerCase()], mult: parseInt(m[2]) };
 }
@@ -323,14 +360,22 @@ function rankSupportOptions(myCard, oppCard, myHp, oppHp, fixedA, hand, oppSuppo
 }
 
 function halveToNearestTen(val){ return Math.floor(val/20)*10; }
+function quarterToNearestTen(val){ return Math.floor(val/40)*10; }
 
 function adjustForEntrance(card){
-  if(card.lvl==='C' || card.lvl==='U'){
+  if(card.lvl==='C'){
     return Object.assign({}, card, {
-      hp:halveToNearestTen(card.hp), o:halveToNearestTen(card.o), t:halveToNearestTen(card.t), x:halveToNearestTen(card.x), _halved:true
+      hp:halveToNearestTen(card.hp), o:halveToNearestTen(card.o), t:halveToNearestTen(card.t), x:halveToNearestTen(card.x),
+      _halved:true, _entryPenalty:'half'
     });
   }
-  return Object.assign({}, card, {_halved:false});
+  if(card.lvl==='U'){
+    return Object.assign({}, card, {
+      hp:quarterToNearestTen(card.hp), o:quarterToNearestTen(card.o), t:quarterToNearestTen(card.t), x:quarterToNearestTen(card.x),
+      _halved:true, _entryPenalty:'quarter'
+    });
+  }
+  return Object.assign({}, card, {_halved:false, _entryPenalty:null});
 }
 
 function effectQualityNote(card){
@@ -387,230 +432,6 @@ function rankSupportOptionsOpenInfo(myCard, oppCard, myHp, oppHp, fixedA, myHand
   const oppSupportCandidates = [[]].concat(
     (oppHandCards||[]).map(c=>parseEffectTags(effectText(c), c))
   );
-  return my    tags.push({type:'boostOwnAttack', amount:parseInt(m[1])});
-  }
-  if(m = /Recover own HP by\s*\+?(\d+)/i.exec(text)){
-    tags.push({type:'healSelf', amount:parseInt(m[1])});
-  }
-  if(m = /Recover foe'?s HP by\s*\+?(\d+)/i.exec(text)){
-    tags.push({type:'healOpp', amount:parseInt(m[1])});
-  }
-  if(/Own HP are halved/i.test(text)) tags.push({type:'halveSelfHp'});
-  if(/Opponent'?s HP are halved/i.test(text)) tags.push({type:'halveOppHp'});
-  const hasSpecificAttackWord = /Own\s+(O|T|X|Circle|Triangle|Cross)\s+[Aa]ttack/i.test(text);
-  if(/own attack power is tripled/i.test(text) && !hasSpecificAttackWord) tags.push({type:'multiplyOwnAttack', mult:3});
-  if(/own attack power is doubled/i.test(text) && !hasSpecificAttackWord) tags.push({type:'multiplyOwnAttack', mult:2});
-  if(/^Attack first\.?$/i.test(text.trim())) tags.push({type:'firstStrike'});
-  if(/Forces? both players? (?:to use|to choose)\s*(O|T|X|Circle|Triangle|Cross)/i.exec(text) || /Both players use\s*(O|T|X)/i.exec(text)){
-    const mm = /Forces? both players? (?:to use|to choose)\s*(O|T|X|Circle|Triangle|Cross)/i.exec(text) || /Both players use\s*(O|T|X)/i.exec(text);
-    tags.push({type:'forceBothAttack', attack:wordToAtk(mm[1])});
-  }
-  if(m = /Own attack becomes\s*(O|T|X|Circle|Triangle|Cross)/i.exec(text)){
-    tags.push({type:'lockOwnAttack', attack:wordToAtk(m[1])});
-  } else if(m = /(O|T|X)\s+and\s+(O|T|X)\s+[Aa]ttack power (?:are|is|becomes) 0/i.exec(text)){
-    const mentioned = [wordToAtk(m[1]), wordToAtk(m[2])];
-    const locked = ['o','t','x'].find(a=>!mentioned.includes(a));
-    if(locked) tags.push({type:'lockOwnAttack', attack:locked});
-  }
-  if(/Opponent'?s attack changes/i.test(text)){
-    // Confirmed by play: this swaps only which damage NUMBER is used, not which
-    // button was pressed -- own X/T/O-triggered abilities still key off the
-    // original chosen attack, not the redirected one. (Disrupt Ray: O->T, T->X, X->O)
-    tags.push({type:'redirectOtherAttackValue', map:{o:'t', t:'x', x:'o'}});
-  }
-  // Common "if both attacks are the same/different" conditional prefix --
-  // applies to whatever effect(s) the rest of the sentence produced above.
-  let condition = null;
-  if(/If both (?:players'? )?attacks? (?:are|is) different/i.test(text)) condition = 'attacksDiffer';
-  else if(/If both (?:players'? )?(?:attacks?|use the same attack)/i.test(text) && /same/i.test(text)) condition = 'attacksSame';
-  if(condition) tags.forEach(t=>{ t.condition = condition; });
-  return tags;
-}
-
-function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSupportTags, hiddenBuffer, iAmTurnPlayer){
-  mySupportTags = mySupportTags||[]; oppSupportTags = oppSupportTags||[]; hiddenBuffer = hiddenBuffer||0;
-  const origA = a, origB = b;
-  function conditionMet(tag){
-    if(!tag.condition) return true;
-    if(tag.condition==='attacksDiffer') return origA !== origB;
-    if(tag.condition==='attacksSame') return origA === origB;
-    return true;
-  }
-  mySupportTags = mySupportTags.filter(conditionMet);
-  oppSupportTags = oppSupportTags.filter(conditionMet);
-
-  mySupportTags.concat(oppSupportTags).forEach(tag=>{
-    if(tag.type==='forceBothAttack'){ a = tag.attack; b = tag.attack; }
-  });
-  mySupportTags.forEach(tag=>{ if(tag.type==='lockOwnAttack'){ a = tag.attack; } });
-  oppSupportTags.forEach(tag=>{ if(tag.type==='lockOwnAttack'){ b = tag.attack; } });
-
-  // Value-only redirects (e.g. Disrupt Ray): change which damage NUMBER is used
-  // without changing which attack was actually "pressed" -- own-attack-triggered
-  // abilities (negation, foe multipliers, first strike) still key off a/b as-is.
-  let aVal = a, bVal = b;
-  mySupportTags.forEach(tag=>{ if(tag.type==='redirectOtherAttackValue'){ bVal = tag.map[b]; } });
-  oppSupportTags.forEach(tag=>{ if(tag.type==='redirectOtherAttackValue'){ aVal = tag.map[a]; } });
-
-  let myDmg = effectiveDamage(myCard, a, oppCard, aVal);
-  let oppDmg = effectiveDamage(oppCard, b, myCard, bVal);
-
-  mySupportTags.forEach(tag=>{
-    if(tag.type==='boostOwnAttack') myDmg += tag.amount;
-    if(tag.type==='boostOwnAttackSpecific' && tag.attack===a) myDmg += tag.amount;
-    if(tag.type==='doubleOwnAttack' && tag.attack===a) myDmg *= 2;
-    if(tag.type==='multiplyOwnAttack') myDmg *= tag.mult;
-    if(tag.type==='zeroOppAttack' && (!tag.attack || tag.attack===b)) oppDmg = 0;
-  });
-  oppSupportTags.forEach(tag=>{
-    if(tag.type==='boostOwnAttack') oppDmg += tag.amount;
-    if(tag.type==='boostOwnAttackSpecific' && tag.attack===b) oppDmg += tag.amount;
-    if(tag.type==='doubleOwnAttack' && tag.attack===b) oppDmg *= 2;
-    if(tag.type==='multiplyOwnAttack') oppDmg *= tag.mult;
-    if(tag.type==='zeroOppAttack' && (!tag.attack || tag.attack===a)) myDmg = 0;
-  });
-
-  if(a==='x'){ const neg=parseNegateTag(myCard.xt); if(neg && neg.toLowerCase()===b) oppDmg=0; }
-  if(b==='x'){ const neg=parseNegateTag(oppCard.xt); if(neg && neg.toLowerCase()===a) myDmg=0; }
-
-  myDmg = Math.max(0, Math.round(myDmg));
-  oppDmg = Math.max(0, Math.round(oppDmg));
-
-  const iCanSteal = activeGrantsFirstStrike(myCard, a) || mySupportTags.some(t=>t.type==='firstStrike');
-  const oppCanSteal = activeGrantsFirstStrike(oppCard, b) || oppSupportTags.some(t=>t.type==='firstStrike');
-  let myGoesFirst;
-  if(iAmTurnPlayer===undefined || iAmTurnPlayer===null){
-    myGoesFirst = iCanSteal && !oppCanSteal ? true : (!iCanSteal && oppCanSteal ? false : null);
-  } else if(iAmTurnPlayer){
-    myGoesFirst = !oppCanSteal;
-  } else {
-    myGoesFirst = iCanSteal;
-  }
-
-  if(myGoesFirst===true){
-    if(myDmg>=oppHp) oppDmg=0;
-  } else if(myGoesFirst===false){
-    if(oppDmg>=myHp) myDmg=0;
-  }
-
-  if(hiddenBuffer) oppDmg += hiddenBuffer;
-
-  // HP-modifying effects (healing, halving) -- these change actual HP totals,
-  // separate from the damage swing used for solver ranking. The resolver
-  // applies these to real HP; ranking/matrix code can ignore them if it wants
-  // pure damage-swing comparisons.
-  let myHealAmt = 0, oppHealAmt = 0, myHalve = false, oppHalve = false;
-  mySupportTags.forEach(tag=>{
-    if(tag.type==='healSelf') myHealAmt += tag.amount;
-    if(tag.type==='healOpp') oppHealAmt += tag.amount;
-    if(tag.type==='halveSelfHp') myHalve = true;
-    if(tag.type==='halveOppHp') oppHalve = true;
-  });
-  oppSupportTags.forEach(tag=>{
-    if(tag.type==='healSelf') oppHealAmt += tag.amount;
-    if(tag.type==='healOpp') myHealAmt += tag.amount;
-    if(tag.type==='halveSelfHp') oppHalve = true;
-    if(tag.type==='halveOppHp') myHalve = true;
-  });
-
-  return { myDmg, oppDmg, koOpp: myDmg>=oppHp, koMe: oppDmg>=myHp, myHealAmt, oppHealAmt, myHalve, oppHalve };
-}
-
-function computeMatrix(myCard, oppCard, myHp, oppHp, mySupportTags, hiddenBuffer, iAmTurnPlayer){
-  const atks=['o','t','x'];
-  const grid = {};
-  atks.forEach(a=>{ grid[a]={}; atks.forEach(b=>{
-    grid[a][b] = computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, [], hiddenBuffer, iAmTurnPlayer);
-  }); });
-  return grid;
-}
-function maximin(grid){
-  const atks=['o','t','x'];
-  let best=null, bestVal=-Infinity;
-  atks.forEach(a=>{
-    let worst=Infinity;
-    atks.forEach(b=>{ const net = grid[a][b].myDmg - grid[a][b].oppDmg; if(net<worst) worst=net; });
-    if(worst>bestVal){ bestVal=worst; best=a; }
-  });
-  return {best, bestVal};
-}
-
-function rankSupportOptions(myCard, oppCard, myHp, oppHp, fixedA, hand, oppSupportTagsKnown, hiddenBuffer, iAmTurnPlayer){
-  const candidates = [{id:'', name:'— none —', tags:[]}].concat(
-    hand.map(c=>({id:String(c._uid||c.id), name:c.name + (c.type==='option'?' (option)':''), tags:parseEffectTags(effectText(c))}))
-  );
-  return candidates.map(cand=>{
-    let worst = Infinity;
-    ['o','t','x'].forEach(b=>{
-      const cell = computeCell(myCard, oppCard, myHp, oppHp, fixedA, b, cand.tags, oppSupportTagsKnown||[], hiddenBuffer||0, iAmTurnPlayer);
-      const net = cell.myDmg - cell.oppDmg;
-      if(net<worst) worst = net;
-    });
-    return { id:cand.id, name:cand.name, worst };
-  }).sort((x,y)=>y.worst-x.worst);
-}
-
-function halveToNearestTen(val){ return Math.floor(val/20)*10; }
-
-function adjustForEntrance(card){
-  if(card.lvl==='C' || card.lvl==='U'){
-    return Object.assign({}, card, {
-      hp:halveToNearestTen(card.hp), o:halveToNearestTen(card.o), t:halveToNearestTen(card.t), x:halveToNearestTen(card.x), _halved:true
-    });
-  }
-  return Object.assign({}, card, {_halved:false});
-}
-
-function effectQualityNote(card){
-  let score = 0; const notes = [];
-  const xt = (card.xt||'').trim();
-  if(parseNegateTag(xt)){ score+=150; notes.push(`Cross negates the opponent's ${parseNegateTag(xt)} entirely.`); }
-  else if(isFirstStrikeXTag(xt)){ score+=100; notes.push('Cross grants first-attack priority (valuable if you end up as the non-turn player).'); }
-  else if(parseFoeMultiplier(xt)){ const fm=parseFoeMultiplier(xt); score+=50; notes.push(`Cross triples damage vs ${fm.spec} opponents (situational).`); }
-  else if(/counter/i.test(xt)){ score+=25; notes.push(`Cross has an order-changing "${xt}" effect (not fully modeled — verify manually).`); }
-  else if(xt && xt.toLowerCase()!=='none'){ notes.push(`Cross effect: "${xt}" (situational, not auto-scored).`); }
-
-  const txt = effectText(card);
-  const supTags = parseEffectTags(txt);
-  supTags.forEach(t=>{
-    if(t.type==='zeroOppAttack'){ score+=100; notes.push('Support can zero an opponent attack outright.'); }
-    if(t.type==='doubleOwnAttack'){ score+=70; notes.push('Support can double one of its own attacks.'); }
-    if(t.type==='boostOwnAttack'){ score+=t.amount/5; notes.push(`Support boosts all attacks by +${t.amount}.`); }
-    if(t.type==='boostOwnAttackSpecific'){ score+=t.amount/8; notes.push(`Support boosts its ${(t.attack||'?').toUpperCase()} by +${t.amount}.`); }
-    if(t.type==='healSelf'){ score+=t.amount/6; notes.push(`Support heals +${t.amount} HP.`); }
-    if(t.type==='halveSelfHp'){ score-=80; notes.push('Support halves own HP — risky.'); }
-    if(t.type==='halveOppHp'){ score+=60; notes.push('Support halves opponent HP.'); }
-    if(t.type==='forceBothAttack'){ score+=20; notes.push(`Support forces both players onto ${(t.attack||'?').toUpperCase()} — situational.`); }
-  });
-  if(/draw \d* ?cards?/i.test(txt)){ score+=30; notes.push('Support draws a card — card advantage.'); }
-  return {score, notes};
-}
-
-function rankEntranceCandidates(hand, oppActive, oppHp){
-  const candidates = hand.filter(c=>c.type==='digimon').map(c=>adjustForEntrance(c));
-  return candidates.map(card=>{
-    const eff = effectQualityNote(card);
-    let matchupVal = null;
-    if(oppActive){
-      const grid = computeMatrix(card, oppActive, card.hp, (oppHp!=null?oppHp:oppActive.hp), [], 0, true);
-      matchupVal = maximin(grid).bestVal;
-    }
-    const avgAtk = Math.round((card.o+card.t+card.x)/3);
-    const heuristic = Math.round(card.hp/10 + avgAtk/5 + eff.score);
-    return { card, matchupVal, heuristic, notes:eff.notes, avgAtk };
-  }).sort((a,b)=>{
-    if(a.matchupVal!==null && b.matchupVal!==null) return b.matchupVal-a.matchupVal;
-    return b.heuristic-a.heuristic;
-  });
-}
-
-function rankSupportOptionsOpenInfo(myCard, oppCard, myHp, oppHp, fixedA, myHand, oppHandCards, iAmTurnPlayer){
-  const myCandidates = [{id:'', name:'— none —', tags:[]}].concat(
-    myHand.map(c=>({id:String(c._uid||c.id), name:c.name + (c.type==='option'?' (option)':''), tags:parseEffectTags(effectText(c))}))
-  );
-  const oppSupportCandidates = [[]].concat(
-    (oppHandCards||[]).map(c=>parseEffectTags(effectText(c)))
-  );
   return myCandidates.map(cand=>{
     let worst = Infinity;
     ['o','t','x'].forEach(b=>{
@@ -622,6 +443,76 @@ function rankSupportOptionsOpenInfo(myCard, oppCard, myHp, oppHp, fixedA, myHand
     });
     return { id:cand.id, name:cand.name, worst };
   }).sort((x,y)=>y.worst-x.worst);
+}
+
+// ============================= DECK GENERATION =============================
+// Heuristic, not a proven-optimal solver: scores owned cards by combat value
+// plus a "specialty depth" bonus (more owned cards in one specialty = more
+// likely to have real digivolve-chain coverage there), always includes owned
+// Partner-line cards, then fills toward a ~23 Digimon / ~7 Option split
+// (roughly matching a typical starter deck's ratio) while respecting owned counts.
+function scoreDigimonForDeck(card, specialtyDepth){
+  const eff = effectQualityNote(card);
+  const avgAtk = (card.o+card.t+card.x)/3;
+  const clusterBonus = Math.min(30, (specialtyDepth[card.sp]||0) * 3);
+  return Math.round(card.hp/10 + avgAtk/5 + eff.score + clusterBonus);
+}
+function scoreOptionForDeck(card){
+  const eff = effectQualityNote(card);
+  return eff.score;
+}
+
+function generateOptimalDeck(collection, targetSize){
+  targetSize = targetSize || 30;
+  const owned = Object.keys(collection).filter(id=>collection[id]>0)
+    .map(id=>ALL_CARDS.find(c=>String(c.id)===String(id))).filter(Boolean);
+
+  const specialtyDepth = {};
+  owned.filter(c=>c.type==='digimon' && c.sp!=='Partner').forEach(c=>{
+    specialtyDepth[c.sp] = (specialtyDepth[c.sp]||0) + collection[c.id];
+  });
+
+  const partnerCards = owned.filter(c=>c.type==='digimon' && c.sp==='Partner');
+  const digimonCards = owned.filter(c=>c.type==='digimon' && c.sp!=='Partner')
+    .map(c=>({card:c, score:scoreDigimonForDeck(c, specialtyDepth)}))
+    .sort((a,b)=>b.score-a.score);
+  const optionCards = owned.filter(c=>c.type==='option')
+    .map(c=>({card:c, score:scoreOptionForDeck(c)}))
+    .sort((a,b)=>b.score-a.score);
+
+  const deck = {};
+  let total = 0;
+  function addUpTo(card, maxCopies){
+    const already = deck[card.id]||0;
+    const owned_ = collection[card.id]||0;
+    const canAdd = Math.min(owned_-already, maxCopies-already, targetSize-total);
+    if(canAdd>0){ deck[card.id] = already+canAdd; total += canAdd; }
+  }
+
+  partnerCards.forEach(c=> addUpTo(c, collection[c.id]||0));
+
+  const digimonTarget = Math.round(targetSize * 23/30);
+  digimonCards.forEach(({card})=>{ if(total<digimonTarget) addUpTo(card, collection[card.id]||0); });
+
+  const optionTarget = targetSize - Math.round(targetSize*23/30) + (digimonTarget - Math.min(total, digimonTarget));
+  optionCards.forEach(({card})=>{ if(total<targetSize) addUpTo(card, collection[card.id]||0); });
+
+  // Backfill with anything remaining if collection was too thin to hit target size.
+  digimonCards.concat(optionCards).forEach(({card})=>{ if(total<targetSize) addUpTo(card, collection[card.id]||0); });
+
+  return deck;
+}
+
+function deckTotalCount(deckCards){ return Object.values(deckCards||{}).reduce((s,n)=>s+n, 0); }
+function deckSpecialtyBreakdown(deckCards){
+  const counts = {};
+  Object.entries(deckCards||{}).forEach(([id,n])=>{
+    const card = ALL_CARDS.find(c=>String(c.id)===String(id));
+    if(!card) return;
+    const key = card.type==='option' ? 'Option' : card.sp;
+    counts[key] = (counts[key]||0) + n;
+  });
+  return counts;
 }
 
 function digivolveOptions(myCard, myDp, hand){
@@ -863,7 +754,7 @@ function applyEntranceSelection(card){
   const adjusted = adjustForEntrance(card);
   document.getElementById('entranceInput').value = card.name;
   document.getElementById('entrancePreview').innerHTML = cardMiniPreview(adjusted, adjusted.hp) +
-    (adjusted._halved ? '<div class="warn-box">Entered directly as '+card.lvl+' — HP and all attacks halved from base.</div>' : '');
+    (adjusted._entryPenalty ? '<div class="warn-box">Entered directly as '+card.lvl+' — HP and all attacks reduced to '+(adjusted._entryPenalty==='quarter'?'1/4 (Ultimate penalty)':'1/2 (Champion penalty)')+' of base.</div>' : '');
   document.getElementById('entranceConfirmBtn').disabled = false;
   App._entrancePicked = { raw: card, adjusted };
 }
@@ -881,7 +772,7 @@ function renderEntrancePhase(el){
       ${ranked.length ? ranked.map((r,i)=>`
         <div class="suggestion-rank ${i===0?'top':''}">
           <span>
-            <b>${r.card.name}</b>${r.card._halved?' (halved on entry)':''} — HP ${r.card.hp}, avg attack ${r.avgAtk}
+            <b>${r.card.name}</b>${r.card._entryPenalty?' ('+(r.card._entryPenalty==='quarter'?'1/4':'1/2')+' on entry)':''} — HP ${r.card.hp}, avg attack ${r.avgAtk}
             ${r.notes.length ? '<br><span class="small-note">'+r.notes.join(' ')+'</span>' : ''}
           </span>
           <span class="val">${r.matchupVal!==null ? (r.matchupVal>=0?'+':'')+r.matchupVal+' worst-case' : 'score '+r.heuristic}</span>
@@ -1101,7 +992,7 @@ function renderAttackPhase(el){
   }
 
   if(B.atkStep==='myReactiveSupport'){
-    const oppTags = B.oppSupportRevealed ? parseEffectTags(effectText(B.oppSupportRevealed)) : [];
+    const oppTags = B.oppSupportRevealed ? parseEffectTags(effectText(B.oppSupportRevealed), B.oppSupportRevealed) : [];
     const ranked = rankSupportOptions(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, B.myHand, oppTags, 0, iAmTurnPlayer);
     const redirectTag = oppTags.find(t=>t.type==='redirectOtherAttackValue');
     const redirectWarning = redirectTag ? `<div class="warn-box">${B.oppSupportRevealed.name} redirects your locked ${B.myLockedAtk.toUpperCase()} to use <b>${redirectTag.map[B.myLockedAtk].toUpperCase()}'s damage number</b> instead. Any support you pick that boosts/doubles "${B.myLockedAtk.toUpperCase()}" still applies — it checks which button you pressed, not which number came out — so it's scored against the redirected value below, not wasted.</div>` : '';
@@ -1232,7 +1123,7 @@ const App = {
     if(B.turnPlayer==='me'){
       removeFromHand(picked.raw._uid||picked.raw.id);
       B.myActive = picked.adjusted; B.myHp = picked.adjusted.hp;
-      logEvent(`You enter with ${picked.adjusted.name}${(picked.raw.lvl==='C'||picked.raw.lvl==='U')?' (halved on entry)':''}.`);
+      logEvent(`You enter with ${picked.adjusted.name}${picked.adjusted._entryPenalty?' ('+(picked.adjusted._entryPenalty==='quarter'?'1/4':'1/2')+' stats on entry)':''}.`);
     } else {
       removeFromOppHand(picked.raw._uid||picked.raw.id);
       B.oppActive = picked.adjusted; B.oppHp = picked.adjusted.hp;
@@ -1385,11 +1276,11 @@ const App = {
     // If a random card's identity was revealed after the fact, use its real tags.
     const mySupportCard = (B.mySupportChoiceId && B.mySupportChoiceId!=='__random__') ? findInHand(B.myHand, B.mySupportChoiceId) : null;
     const myRandomReveal = (B.mySupportChoiceId==='__random__') ? App._myRandomRevealCard : null;
-    const mySupportTags = mySupportCard ? parseEffectTags(effectText(mySupportCard)) : (myRandomReveal ? parseEffectTags(effectText(myRandomReveal)) : []);
+    const mySupportTags = mySupportCard ? parseEffectTags(effectText(mySupportCard), mySupportCard) : (myRandomReveal ? parseEffectTags(effectText(myRandomReveal), myRandomReveal) : []);
 
     const oppWasRandom = B.oppSupportRevealed && B.oppSupportRevealed.type==='unknown';
     const oppRandomReveal = oppWasRandom ? App._oppRandomRevealCard : null;
-    const oppSupportTags = (B.oppSupportRevealed && !oppWasRandom) ? parseEffectTags(effectText(B.oppSupportRevealed)) : (oppRandomReveal ? parseEffectTags(effectText(oppRandomReveal)) : []);
+    const oppSupportTags = (B.oppSupportRevealed && !oppWasRandom) ? parseEffectTags(effectText(B.oppSupportRevealed), B.oppSupportRevealed) : (oppRandomReveal ? parseEffectTags(effectText(oppRandomReveal), oppRandomReveal) : []);
 
     // Labels the button actually pressed alongside any redirect that changed
     // which NUMBER got used -- e.g. "O (redirected to T's value)" -- so the
@@ -1427,17 +1318,22 @@ const App = {
     if(cell.oppHalve) B.oppHp = Math.floor(B.oppHp/2);
     if(cell.myHealAmt) B.myHp += cell.myHealAmt;
     if(cell.oppHealAmt) B.oppHp += cell.oppHealAmt;
+    // Crash: HP is set to exactly 10 as the cost of the attack -- overrides everything else above.
+    if(cell.mySetHp!=null) B.myHp = cell.mySetHp;
+    if(cell.oppSetHp!=null) B.oppHp = cell.oppSetHp;
     if(mySupportCard) removeFromHand(mySupportCard._uid||mySupportCard.id);
 
     const mySupportLabel = mySupportCard ? ' + '+mySupportCard.name : (myRandomReveal ? ' + random card (revealed: '+myRandomReveal.name+')' : (B.mySupportChoiceId==='__random__' ? ' + random card (unknown effect)' : ''));
     const oppSupportLabel = B.oppSupportRevealed ? ' + '+(oppRandomReveal ? 'random card (revealed: '+oppRandomReveal.name+')' : B.oppSupportRevealed.name+(oppWasRandom?' (unknown effect)':'')) : '';
     let hpEffectNote = '';
-    if(cell.myHealAmt || cell.oppHealAmt || cell.myHalve || cell.oppHalve){
+    if(cell.myHealAmt || cell.oppHealAmt || cell.myHalve || cell.oppHalve || cell.mySetHp!=null || cell.oppSetHp!=null){
       const parts = [];
       if(cell.myHealAmt) parts.push(`you recovered ${cell.myHealAmt} HP`);
       if(cell.oppHealAmt) parts.push(`opponent recovered ${cell.oppHealAmt} HP`);
       if(cell.myHalve) parts.push(`your HP was halved`);
       if(cell.oppHalve) parts.push(`opponent's HP was halved`);
+      if(cell.mySetHp!=null) parts.push(`your HP became ${cell.mySetHp} (Crash)`);
+      if(cell.oppSetHp!=null) parts.push(`opponent's HP became ${cell.oppSetHp} (Crash)`);
       hpEffectNote = ' ('+parts.join(', ')+', applied and permanent)';
     }
     logEvent(`You: ${attackLabel(B.myLockedAtk, true)} (${cell.myDmg} dmg)${mySupportLabel} vs Opponent: ${attackLabel(oppAtk, false)} (${cell.oppDmg} dmg)${oppSupportLabel}${unknownNote}${hpEffectNote}. HP now You ${B.myHp} / Opp ${B.oppHp}.`);
@@ -1573,6 +1469,185 @@ function renderOptionTable(){
   document.getElementById('optBody').innerHTML = rows.map(o=>`<tr><td style="width:180px"><b>${o.name}</b></td><td>${o.effect}</td></tr>`).join('');
 }
 
+/* ============================= COLLECTION TAB ============================= */
+function renderCollectionTable(){
+  const q = (document.getElementById('collectionSearch').value||'').toLowerCase();
+  const rows = ALL_CARDS.filter(c=>c.name.toLowerCase().includes(q)).sort((a,b)=>a.id-b.id);
+  const owned = Object.values(COLLECTION).reduce((s,n)=>s+(n||0),0);
+  document.getElementById('collectionOwnedCount').textContent = owned;
+  document.getElementById('collectionBody').innerHTML = rows.map(c=>`
+    <tr>
+      <td>${String(c.id).padStart(3,'0')}</td>
+      <td>${c.name}</td>
+      <td>${c.lvl||'—'}</td>
+      <td>${c.type==='option'?'—':`<span class="badge ${specClass(c.sp)}">${c.sp}</span>`}</td>
+      <td><input type="number" min="0" style="width:60px" value="${COLLECTION[c.id]||0}" data-cid="${c.id}" class="collection-count-input"></td>
+    </tr>
+  `).join('');
+  document.querySelectorAll('.collection-count-input').forEach(inp=>{
+    inp.addEventListener('change', async (e)=>{
+      const n = Math.max(0, parseInt(e.target.value)||0);
+      const cid = e.target.dataset.cid;
+      if(n>0) COLLECTION[cid]=n; else delete COLLECTION[cid];
+      await saveCollection();
+      renderCollectionTable();
+    });
+  });
+}
+
+Object.assign(App, {
+  async importCollectionBulk(){
+    const lines = document.getElementById('collectionBulkInput').value.split('\n');
+    let matched=0, unmatched=[];
+    lines.forEach(line=>{
+      const parsed = parseCollectionLine(line);
+      if(!parsed || !parsed.name) return;
+      const card = findCardByName(parsed.name) || (searchCards(parsed.name,{limit:1})[0]);
+      if(card){ COLLECTION[card.id] = parsed.count; matched++; }
+      else unmatched.push(parsed.name);
+    });
+    await saveCollection();
+    renderCollectionTable();
+    document.getElementById('collectionImportResult').innerHTML =
+      `<div class="assumptions">Matched ${matched} card(s).${unmatched.length? '<br>Unmatched (fix manually below or edit the line): '+unmatched.map(u=>'"'+u+'"').join(', ') : ''}</div>`;
+  },
+  async clearCollection(){
+    if(!confirm('Clear your entire tracked collection? This cannot be undone.')) return;
+    COLLECTION = {};
+    await saveCollection();
+    renderCollectionTable();
+  }
+});
+
+/* ============================= DECK BUILDER TAB ============================= */
+let activeDeckSlot = 0;
+
+function renderDeckTabs(){
+  const el = document.getElementById('deckSlotTabs');
+  el.innerHTML = [0,1,2].map(i=>{
+    const d = DECKS[i];
+    const label = d ? d.name : `Deck ${i+1} (empty)`;
+    return `<button class="tag-btn ${activeDeckSlot===i?'active':''}" onclick="App.selectDeckSlot(${i})">${label}</button>`;
+  }).join('');
+}
+
+function renderDeckEditor(){
+  const el = document.getElementById('deckEditor');
+  const deck = DECKS[activeDeckSlot];
+  const cards = deck ? deck.cards : {};
+  const total = deckTotalCount(cards);
+  const breakdown = deckSpecialtyBreakdown(cards);
+  const entries = Object.entries(cards).map(([id,n])=>{
+    const c = ALL_CARDS.find(x=>String(x.id)===String(id));
+    return c ? {card:c, n} : null;
+  }).filter(Boolean).sort((a,b)=>a.card.id-b.card.id);
+
+  el.innerHTML = `
+    <div class="flex-between">
+      <div>
+        <label>DECK NAME</label>
+        <input id="deckNameInput" value="${deck?deck.name:''}" placeholder="e.g. Red Deck" style="width:260px;display:inline-block">
+        <button class="btn small secondary" onclick="App.renameDeck()">RENAME</button>
+      </div>
+      <div class="pill-btns">
+        <button class="btn small" onclick="App.generateDeck()">GENERATE OPTIMAL DECK</button>
+        <button class="btn small secondary" onclick="App.clearDeck()">CLEAR</button>
+      </div>
+    </div>
+    <div class="score-badge" style="margin-top:10px;display:inline-block">CARDS <b>${total}</b> / 30</div>
+    ${Object.entries(breakdown).map(([k,v])=>`<span class="score-badge" style="margin-left:6px">${k} <b>${v}</b></span>`).join('')}
+    ${total>30 ? '<div class="warn-box">Over 30 cards — trim before using this deck in a match.</div>' : ''}
+
+    <label style="margin-top:14px">ADD A CARD (from your collection)</label>
+    <div class="search-box"><input id="deckAddInput" placeholder="Type a card name..." autocomplete="off"><div class="suggest-list" id="deckAddInput_list"></div></div>
+
+    <label style="margin-top:12px">BULK IMPORT (paste a 30-line deck list, or "Name xN" lines — replaces this deck)</label>
+    <textarea id="deckBulkInput" rows="6" placeholder="1. Tyrannomon&#10;2. Tyrannomon&#10;..."></textarea>
+    <button class="btn small secondary" style="margin-top:6px" onclick="App.importDeckBulk()">IMPORT AS THIS DECK</button>
+    <div id="deckImportResult" style="margin-top:8px"></div>
+
+    <div class="db-scroll" style="margin-top:12px">
+      <table class="db"><thead><tr><th>#</th><th>Name</th><th>Lvl</th><th>Specialty</th><th>In Deck</th><th>Owned</th><th></th></tr></thead>
+      <tbody>
+        ${entries.map(({card,n})=>`
+          <tr>
+            <td>${String(card.id).padStart(3,'0')}</td>
+            <td>${card.name}</td>
+            <td>${card.lvl||'—'}</td>
+            <td>${card.type==='option'?'—':`<span class="badge ${specClass(card.sp)}">${card.sp}</span>`}</td>
+            <td>${n}</td>
+            <td>${COLLECTION[card.id]||0}</td>
+            <td><button class="btn small secondary" onclick="App.adjustDeckCard('${card.id}',-1)">−</button>
+                <button class="btn small secondary" onclick="App.adjustDeckCard('${card.id}',1)">+</button></td>
+          </tr>
+        `).join('')}
+      </tbody></table>
+    </div>
+  `;
+  wireSearchBox('deckAddInput', {}, (card)=>{
+    App.adjustDeckCard(card.id, 1);
+  });
+}
+
+Object.assign(App, {
+  selectDeckSlot(i){ activeDeckSlot=i; renderDeckTabs(); renderDeckEditor(); },
+
+  async renameDeck(){
+    const name = document.getElementById('deckNameInput').value.trim() || `Deck ${activeDeckSlot+1}`;
+    if(!DECKS[activeDeckSlot]) DECKS[activeDeckSlot] = {name, cards:{}};
+    else DECKS[activeDeckSlot].name = name;
+    await saveDecks();
+    renderDeckTabs(); renderDeckEditor();
+  },
+
+  async adjustDeckCard(cardId, delta){
+    if(!DECKS[activeDeckSlot]) DECKS[activeDeckSlot] = {name:`Deck ${activeDeckSlot+1}`, cards:{}};
+    const deck = DECKS[activeDeckSlot];
+    const owned = COLLECTION[cardId]||0;
+    const current = deck.cards[cardId]||0;
+    let next = current + delta;
+    next = Math.max(0, Math.min(owned, next));
+    if(next>0) deck.cards[cardId]=next; else delete deck.cards[cardId];
+    await saveDecks();
+    renderDeckTabs(); renderDeckEditor();
+  },
+
+  async clearDeck(){
+    if(!confirm('Clear this deck?')) return;
+    if(DECKS[activeDeckSlot]) DECKS[activeDeckSlot].cards = {};
+    await saveDecks();
+    renderDeckEditor();
+  },
+
+  async generateDeck(){
+    const generated = generateOptimalDeck(COLLECTION, 30);
+    const name = (DECKS[activeDeckSlot] && DECKS[activeDeckSlot].name) || `Deck ${activeDeckSlot+1}`;
+    DECKS[activeDeckSlot] = { name, cards: generated };
+    await saveDecks();
+    renderDeckTabs(); renderDeckEditor();
+  },
+
+  async importDeckBulk(){
+    const lines = document.getElementById('deckBulkInput').value.split('\n');
+    const cards = {}; let matched=0; const unmatched=[];
+    lines.forEach(line=>{
+      const parsed = parseCollectionLine(line);
+      if(!parsed || !parsed.name) return;
+      const card = findCardByName(parsed.name) || (searchCards(parsed.name,{limit:1})[0]);
+      if(card){ cards[card.id] = (cards[card.id]||0) + parsed.count; matched++; }
+      else unmatched.push(parsed.name);
+    });
+    // Cap at owned counts
+    Object.keys(cards).forEach(id=>{ cards[id] = Math.min(cards[id], COLLECTION[id]||0); if(cards[id]<=0) delete cards[id]; });
+    const name = (DECKS[activeDeckSlot] && DECKS[activeDeckSlot].name) || `Deck ${activeDeckSlot+1}`;
+    DECKS[activeDeckSlot] = { name, cards };
+    await saveDecks();
+    renderDeckTabs(); renderDeckEditor();
+    document.getElementById('deckImportResult').innerHTML =
+      `<div class="assumptions">Imported ${matched} line(s), deck now has ${deckTotalCount(cards)} cards (capped at what you own).${unmatched.length? '<br>Unmatched: '+unmatched.map(u=>'"'+u+'"').join(', ') : ''}</div>`;
+  }
+});
+
 function wireTabs(){
   document.querySelectorAll('nav button').forEach(btn=>{
     btn.addEventListener('click', ()=>{
@@ -1580,8 +1655,11 @@ function wireTabs(){
       document.querySelectorAll('.tabsection').forEach(s=>s.classList.remove('active'));
       btn.classList.add('active');
       document.getElementById('tab-'+btn.dataset.tab).classList.add('active');
+      if(btn.dataset.tab==='collection') renderCollectionTable();
+      if(btn.dataset.tab==='decks'){ renderDeckTabs(); renderDeckEditor(); }
     });
   });
+  document.getElementById('collectionSearch').addEventListener('input', renderCollectionTable);
 }
 
 (async function init(){
