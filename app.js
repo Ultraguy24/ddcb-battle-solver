@@ -1396,7 +1396,7 @@ function renderDbTable(){
 }
 
 function renderSpecFilters(){
-  const specs=["Fire","Water","Nature","Darkness","Rare","Partner"];
+  const specs=["Fire","Water","Nature","Darkness","Rare"];
   document.getElementById('specFilters').innerHTML = specs.map(s=>`<button class="tag-btn ${dbFilterSpec===s?'active':''}" data-spec="${s}">${s}</button>`).join('') +
     `<button class="tag-btn ${!dbFilterSpec?'active':''}" data-spec="">All</button>`;
   document.querySelectorAll('#specFilters .tag-btn').forEach(b=>b.addEventListener('click', ()=>{ dbFilterSpec=b.dataset.spec||null; renderSpecFilters(); renderDbTable(); }));
