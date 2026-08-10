@@ -2592,7 +2592,8 @@
     "t": 350,
     "x": 0,
     "xt": "O counter",
-    "note": "Boost own attack power +100. Draw 1 card."
+    "note": "Boost own attack power +100. Draw 1 card.",
+    "isPartner": true
   },
   {
     "id": 173,
@@ -2607,7 +2608,8 @@
     "t": 300,
     "x": 200,
     "xt": "O to 0",
-    "note": "Boost own Attack Power by +100. Draw 1 card."
+    "note": "Boost own Attack Power by +100. Draw 1 card.",
+    "isPartner": true
   },
   {
     "id": 174,
@@ -2622,14 +2624,15 @@
     "t": 460,
     "x": 190,
     "xt": "O to 0",
-    "note": "If HP is less than opponent's, recover HP +500."
+    "note": "If HP is less than opponent's, recover HP +500.",
+    "isPartner": true
   },
   {
     "id": 175,
     "type": "digimon",
     "name": "Veemon",
     "lvl": "R",
-    "sp": "Partner",
+    "sp": "Fire",
     "hp": 550,
     "dp": 0,
     "pp": 20,
@@ -2637,7 +2640,8 @@
     "t": 280,
     "x": 200,
     "xt": "none",
-    "note": "Boost own attack power +100. Draw 1 card."
+    "note": "Boost own attack power +100. Draw 1 card.",
+    "isPartner": true
   },
   {
     "id": 176,
@@ -2652,7 +2656,8 @@
     "t": 300,
     "x": 200,
     "xt": "O to 0",
-    "note": "Discard 2 cards from opponent's Online Deck. Draw 1 card."
+    "note": "Discard 2 cards from opponent's Online Deck. Draw 1 card.",
+    "isPartner": true
   },
   {
     "id": 177,
@@ -2667,7 +2672,8 @@
     "t": 350,
     "x": 0,
     "xt": "X counter",
-    "note": "Lower opponent's Attack power -100. Draw 1 card."
+    "note": "Lower opponent's Attack power -100. Draw 1 card.",
+    "isPartner": true
   },
   {
     "id": 178,
@@ -2682,7 +2688,8 @@
     "t": 300,
     "x": 250,
     "xt": "fire foe x3",
-    "note": "Change own Specialty to Nature. Draw 1 card."
+    "note": "Change own Specialty to Nature. Draw 1 card.",
+    "isPartner": true
   },
   {
     "id": 179,
@@ -2697,7 +2704,8 @@
     "t": 300,
     "x": 250,
     "xt": "O to 0",
-    "note": "Draw 3 cards."
+    "note": "Draw 3 cards.",
+    "isPartner": true
   },
   {
     "id": 180,
@@ -2712,7 +2720,8 @@
     "t": 300,
     "x": 200,
     "xt": "1st attack",
-    "note": "If foe's Specialty is Nature, own Attack Power is doubled. Draw 1 card."
+    "note": "If foe's Specialty is Nature, own Attack Power is doubled. Draw 1 card.",
+    "isPartner": true
   },
   {
     "id": 181,
@@ -2727,7 +2736,8 @@
     "t": 340,
     "x": 240,
     "xt": "O to 0",
-    "note": "Attack Power is halved. Recover HP +600."
+    "note": "Attack Power is halved. Recover HP +600.",
+    "isPartner": true
   },
   {
     "id": 182,
@@ -2742,7 +2752,8 @@
     "t": 220,
     "x": 0,
     "xt": "O counter",
-    "note": "Draw 3 cards."
+    "note": "Draw 3 cards.",
+    "isPartner": true
   },
   {
     "id": 183,
@@ -2757,7 +2768,8 @@
     "t": 170,
     "x": 0,
     "xt": "O counter",
-    "note": "If foe's Specialty is Dark, own Attack Power is doubled. Draw 1 card."
+    "note": "If foe's Specialty is Dark, own Attack Power is doubled. Draw 1 card.",
+    "isPartner": true
   },
   {
     "id": 184,
@@ -2772,7 +2784,8 @@
     "t": 240,
     "x": 340,
     "xt": "T counter",
-    "note": "Change own Specialty to Nature. Draw 1 card."
+    "note": "Change own Specialty to Nature. Draw 1 card.",
+    "isPartner": true
   },
   {
     "id": 185,
@@ -2787,7 +2800,8 @@
     "t": 300,
     "x": 400,
     "xt": "T to 0",
-    "note": "Boost own attack by +100. Draw 1 card."
+    "note": "Boost own attack by +100. Draw 1 card.",
+    "isPartner": true
   },
   {
     "id": 186,
@@ -2802,7 +2816,8 @@
     "t": 350,
     "x": 150,
     "xt": "jamming",
-    "note": "Lower opponent's Attack Power -100. Draw 1 card."
+    "note": "Lower opponent's Attack Power -100. Draw 1 card.",
+    "isPartner": true
   },
   {
     "id": 187,
@@ -2817,7 +2832,8 @@
     "t": 250,
     "x": 170,
     "xt": "O to 0",
-    "note": "Lower opponent's Attack Power -100. Draw 1 card."
+    "note": "Lower opponent's Attack Power -100. Draw 1 card.",
+    "isPartner": true
   },
   {
     "id": 188,
@@ -2832,7 +2848,8 @@
     "t": 350,
     "x": 250,
     "xt": "X to 0",
-    "note": "Draw 3 cards."
+    "note": "Draw 3 cards.",
+    "isPartner": true
   },
   {
     "id": 189,
@@ -2847,7 +2864,8 @@
     "t": 430,
     "x": 440,
     "xt": "none",
-    "note": "Discard 2 cards from opponent's Online Deck. Draw 1 card."
+    "note": "Discard 2 cards from opponent's Online Deck. Draw 1 card.",
+    "isPartner": true
   },
   {
     "id": 190,
@@ -2862,7 +2880,8 @@
     "t": 270,
     "x": 230,
     "xt": "O to 0",
-    "note": "Discard 2 cards from opponent's Online Deck. Draw 1 card."
+    "note": "Discard 2 cards from opponent's Online Deck. Draw 1 card.",
+    "isPartner": true
   },
   {
     "id": 191,
