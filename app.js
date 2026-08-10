@@ -34,17 +34,18 @@ async function loadCardJson(){
   }
 }
 
+const STORAGE_PREFIX = 'ddcb_';
 async function loadStorage(){
-  try{ const r = await window.storage.get('card_overrides'); if(r && r.value) cardOverrides = JSON.parse(r.value); }catch(e){ cardOverrides = {}; }
-  try{ const r2 = await window.storage.get('custom_cards'); if(r2 && r2.value) customCards = JSON.parse(r2.value); }catch(e){ customCards = []; }
-  try{ const r3 = await window.storage.get('collection'); if(r3 && r3.value) COLLECTION = JSON.parse(r3.value); }catch(e){ COLLECTION = {}; }
-  try{ const r4 = await window.storage.get('decks'); if(r4 && r4.value) DECKS = JSON.parse(r4.value); }catch(e){ DECKS = [null,null,null]; }
+  try{ const r = localStorage.getItem(STORAGE_PREFIX+'card_overrides'); if(r) cardOverrides = JSON.parse(r); }catch(e){ cardOverrides = {}; }
+  try{ const r2 = localStorage.getItem(STORAGE_PREFIX+'custom_cards'); if(r2) customCards = JSON.parse(r2); }catch(e){ customCards = []; }
+  try{ const r3 = localStorage.getItem(STORAGE_PREFIX+'collection'); if(r3) COLLECTION = JSON.parse(r3); }catch(e){ COLLECTION = {}; }
+  try{ const r4 = localStorage.getItem(STORAGE_PREFIX+'decks'); if(r4) DECKS = JSON.parse(r4); }catch(e){ DECKS = [null,null,null]; }
   rebuildAllCards();
 }
-async function saveOverrides(){ try{ await window.storage.set('card_overrides', JSON.stringify(cardOverrides)); }catch(e){} }
-async function saveCustomCards(){ try{ await window.storage.set('custom_cards', JSON.stringify(customCards)); }catch(e){} }
-async function saveCollection(){ try{ await window.storage.set('collection', JSON.stringify(COLLECTION)); }catch(e){} }
-async function saveDecks(){ try{ await window.storage.set('decks', JSON.stringify(DECKS)); }catch(e){} }
+async function saveOverrides(){ try{ localStorage.setItem(STORAGE_PREFIX+'card_overrides', JSON.stringify(cardOverrides)); }catch(e){ console.error('Save failed:', e); } }
+async function saveCustomCards(){ try{ localStorage.setItem(STORAGE_PREFIX+'custom_cards', JSON.stringify(customCards)); }catch(e){ console.error('Save failed:', e); } }
+async function saveCollection(){ try{ localStorage.setItem(STORAGE_PREFIX+'collection', JSON.stringify(COLLECTION)); }catch(e){ console.error('Save failed:', e); } }
+async function saveDecks(){ try{ localStorage.setItem(STORAGE_PREFIX+'decks', JSON.stringify(DECKS)); }catch(e){ console.error('Save failed:', e); } }
 
 // Parses one line of pasted collection/deck text into {name, count}. Handles:
 //  "011 - Lv U - Type Fire - Meteormon - 1 Cards"   (in-game collection menu format)
@@ -606,11 +607,14 @@ function hpBar(cur, max){
   const pct = max>0 ? Math.max(0,Math.min(100, Math.round(cur/max*100))) : 0;
   return `<div class="hp-bar"><div class="hp-bar-fill" style="width:${pct}%"></div></div>`;
 }
+function partnerBadge(card){
+  return card && card.isPartner ? '<span class="badge" style="background:#008000;border-color:#000" title="Partner Digimon: can gain EXP, equip Digi-Parts, Armor Digivolve with a Digi-Egg">PARTNER</span>' : '';
+}
 function cardMiniPreview(card, hp){
   if(!card) return `<div class="small-note">Not chosen yet.</div>`;
   return `
     <div class="card-preview">
-      <div class="name">${card.name} <span class="badge ${specClass(card.sp)}">${card.sp}</span> <span class="badge" style="background:#000080;border-color:#000">${card.lvl}</span></div>
+      <div class="name">${card.name} <span class="badge ${specClass(card.sp)}">${card.sp}</span> <span class="badge" style="background:#000080;border-color:#000">${card.lvl}</span> ${partnerBadge(card)}</div>
       <div>HP ${hp} / ${card.hp}</div>
       ${hpBar(hp, card.hp)}
       <div class="atk-grid">
@@ -1380,7 +1384,7 @@ function renderDbTable(){
   });
   document.getElementById('dbBody').innerHTML = rows.map(c=>`
     <tr>
-      <td>${c.id}</td><td>${c.name}</td><td>${c.lvl}</td>
+      <td>${c.id}</td><td>${c.name}${c.isPartner?' '+partnerBadge(c):''}</td><td>${c.lvl}</td>
       <td><span class="badge ${specClass(c.sp)}">${c.sp}</span></td>
       <td>${c.hp}</td><td>${c.dp}</td><td>${c.pp}</td>
       <td>${c.o}</td><td>${c.t}</td><td>${c.x}</td>
@@ -1399,7 +1403,7 @@ function renderSpecFilters(){
 }
 
 function openEditForm(id){
-  const card = ALL_CARDS.find(c=>String(c.id)===String(id)) || {id:'new_'+Date.now(),type:'digimon',name:'',lvl:'R',sp:'Fire',hp:0,dp:0,pp:0,o:0,t:0,x:0,xt:'none',note:''};
+  const card = ALL_CARDS.find(c=>String(c.id)===String(id)) || {id:'new_'+Date.now(),type:'digimon',name:'',lvl:'R',sp:'Fire',hp:0,dp:0,pp:0,o:0,t:0,x:0,xt:'none',note:'',isPartner:false};
   document.getElementById('ef-id').value = card.id;
   document.getElementById('ef-name').value = card.name;
   document.getElementById('ef-lvl').value = card.lvl;
@@ -1412,6 +1416,7 @@ function openEditForm(id){
   document.getElementById('ef-x').value = card.x;
   document.getElementById('ef-xt').value = card.xt;
   document.getElementById('ef-note').value = card.note;
+  document.getElementById('ef-partner').checked = !!card.isPartner;
   document.getElementById('editForm').classList.add('open');
 }
 
@@ -1440,7 +1445,8 @@ function wireDbTab(){
       t: parseInt(document.getElementById('ef-t').value)||0,
       x: parseInt(document.getElementById('ef-x').value)||0,
       xt: document.getElementById('ef-xt').value,
-      note: document.getElementById('ef-note').value
+      note: document.getElementById('ef-note').value,
+      isPartner: document.getElementById('ef-partner').checked
     };
     const isSeed = SEED_CARDS.some(c=>String(c.id)===String(idRaw));
     if(isSeed){ cardOverrides[idRaw]=fields; await saveOverrides(); }
@@ -1478,7 +1484,7 @@ function renderCollectionTable(){
   document.getElementById('collectionBody').innerHTML = rows.map(c=>`
     <tr>
       <td>${String(c.id).padStart(3,'0')}</td>
-      <td>${c.name}</td>
+      <td>${c.name}${c.isPartner?' '+partnerBadge(c):''}</td>
       <td>${c.lvl||'—'}</td>
       <td>${c.type==='option'?'—':`<span class="badge ${specClass(c.sp)}">${c.sp}</span>`}</td>
       <td><input type="number" min="0" style="width:60px" value="${COLLECTION[c.id]||0}" data-cid="${c.id}" class="collection-count-input"></td>
