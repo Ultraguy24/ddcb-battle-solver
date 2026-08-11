@@ -47,17 +47,11 @@ async function saveCustomCards(){ try{ localStorage.setItem(STORAGE_PREFIX+'cust
 async function saveCollection(){ try{ localStorage.setItem(STORAGE_PREFIX+'collection', JSON.stringify(COLLECTION)); }catch(e){ console.error('Save failed:', e); } }
 async function saveDecks(){ try{ localStorage.setItem(STORAGE_PREFIX+'decks', JSON.stringify(DECKS)); }catch(e){ console.error('Save failed:', e); } }
 
-// Parses one line of pasted collection/deck text into {name, count}. Handles:
-//  "011 - Lv U - Type Fire - Meteormon - 1 Cards"   (in-game collection menu format)
-//  "2 Tyrannomon" / "Tyrannomon x2" / "Tyrannomon x 2"
-//  "1. Tyrannomon" (numbered deck list -- count implied as 1)
-//  "Tyrannomon"    (bare name -- count implied as 1)
 function parseCollectionLine(line){
   line = line.trim();
   if(!line) return null;
   let m;
-  // in-game collection menu format: "011 - Lv U - Type Fire - Meteormon - 1 Cards"
-  // (also tolerates "N/A" fields for Option cards with no level/type)
+
   if(/-\s*\d+\s*Cards?\s*$/i.exec(line)){
     const parts = line.split(/\s*-\s*/).map(p=>p.trim()).filter(p=>p.length);
     const countPart = parts[parts.length-1];
@@ -87,6 +81,7 @@ function searchCards(query, opts={}){
   const q = (query||'').trim().toLowerCase();
   let pool = ALL_CARDS;
   if(opts.type) pool = pool.filter(c=>c.type===opts.type);
+  if(opts.onlyInDeck){ pool = pool.filter(c=>deckRemaining(c.id)>0); }
   if(!q) return pool.slice(0, opts.limit||8);
   return pool.filter(c=>c.name.toLowerCase().includes(q)).slice(0, opts.limit||8);
 }
@@ -111,23 +106,13 @@ function parseNegateTag(xt){
 function isFirstStrikeXTag(xt){ return /^1st attack$/i.test((xt||"").trim()); }
 function baseVal(card, atk){ return atk==='o'?card.o: atk==='t'?card.t: card.x; }
 
-// Full official description: "If Opponent uses [X] Attack, it will miss. Then
-// you counter with opponent's [X] attack power." Triggers when THIS card's
-// owner presses Cross and the opponent happens to pick the matching attack --
-// their hit is negated and replaced with a reflect using THEIR OWN stat at
-// that attack type (which is why counter cards are always printed with X:0 --
-// the plain Cross whiff is the fallback when the condition isn't met).
 function parseCounterTag(xt){
   const m = /^(O|T|X)\s+counter$/i.exec((xt||"").trim()) || /^counter\s+(O|T|X)$/i.exec((xt||"").trim());
   return m ? m[1].toUpperCase() : null;
 }
-// "Attack Power becomes same as HP. HP becomes 10." -- own Cross damage is
-// replaced by current HP, then HP is set to exactly 10 after the bout resolves.
+
 function isCrashXTag(xt){ return /^crash$/i.test((xt||"").trim()); }
-// "Recover the same amount of HP as the damage inflicted" -- lifesteal on Cross.
 function isEatUpHpXTag(xt){ return /^eat[\s-]?up hp$/i.test((xt||"").trim()); }
-// "Opponent's Support Effect is Voided. Can't Void Option Effect." -- voids
-// the opponent's DIGIMON-card support effect specifically, not Option cards.
 function xtGrantsJamming(xt){ return /^jamming$/i.test((xt||"").trim()); }
 
 function effectiveDamage(attacker, atkKey, defender, valueKey){
@@ -189,13 +174,9 @@ function parseEffectTags(text, card){
     if(locked) tags.push({type:'lockOwnAttack', attack:locked});
   }
   if(/Opponent'?s attack changes/i.test(text)){
-    // Confirmed by play: this swaps only which damage NUMBER is used, not which
-    // button was pressed -- own X/T/O-triggered abilities still key off the
-    // original chosen attack, not the redirected one. (Disrupt Ray: O->T, T->X, X->O)
     tags.push({type:'redirectOtherAttackValue', map:{o:'t', t:'x', x:'o'}});
   }
-  // Common "if both attacks are the same/different" conditional prefix --
-  // applies to whatever effect(s) the rest of the sentence produced above.
+
   let condition = null;
   if(/If both (?:players'? )?attacks? (?:are|is) different/i.test(text)) condition = 'attacksDiffer';
   else if(/If both (?:players'? )?(?:attacks?|use the same attack)/i.test(text) && /same/i.test(text)) condition = 'attacksSame';
@@ -277,10 +258,6 @@ function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSuppo
   myDmg = Math.max(0, Math.round(myDmg));
   oppDmg = Math.max(0, Math.round(oppDmg));
 
-  // First-strike: the turn player goes first by default. The non-turn player
-  // can steal that only if the turn player does NOT also have a "1st Attack"
-  // trait -- per the official text, having it yourself voids a foe's steal
-  // attempt even though it's otherwise redundant for whoever already goes first.
   const iCanSteal = activeGrantsFirstStrike(myCard, a) || mySupportTags.some(t=>t.type==='firstStrike');
   const oppCanSteal = activeGrantsFirstStrike(oppCard, b) || oppSupportTags.some(t=>t.type==='firstStrike');
   let myGoesFirst;
@@ -301,9 +278,6 @@ function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSuppo
 
   if(hiddenBuffer) oppDmg += hiddenBuffer;
 
-  // HP-modifying effects (healing, halving, Crash's HP-to-10, Eat-up-HP
-  // lifesteal) -- these change actual HP totals, separate from the damage
-  // swing used for solver ranking. The resolver applies these to real HP.
   let myHealAmt = 0, oppHealAmt = 0, myHalve = false, oppHalve = false;
   let mySetHp = null, oppSetHp = null;
   mySupportTags.forEach(tag=>{
@@ -447,11 +421,6 @@ function rankSupportOptionsOpenInfo(myCard, oppCard, myHp, oppHp, fixedA, myHand
 }
 
 // ============================= DECK GENERATION =============================
-// Heuristic, not a proven-optimal solver: scores owned cards by combat value
-// plus a "specialty depth" bonus (more owned cards in one specialty = more
-// likely to have real digivolve-chain coverage there), always includes owned
-// Partner-line cards, then fills toward a ~23 Digimon / ~7 Option split
-// (roughly matching a typical starter deck's ratio) while respecting owned counts.
 function scoreDigimonForDeck(card, specialtyDepth){
   const eff = effectQualityNote(card);
   const avgAtk = (card.o+card.t+card.x)/3;
@@ -552,11 +521,13 @@ const B = {
   myDpTotal:0, oppDpTotal:0,
   myHand:[],
   oppHand:[],
-  phase:'kickoff',
+  phase:'deckselect',
   atkStep:'pick',
   myLockedAtk:null,
   mySupportChoiceId:'',
   oppSupportRevealed:null,
+  selectedDeckId:null, // null | 0 | 1 | 2 -- which of your 3 decks you're using this match
+  deckUsedThisMatch:{}, // {cardId: count} -- cards drawn from deck into hand so far this match
   log:[],
 };
 
@@ -566,12 +537,34 @@ function newDuel(){
   Object.assign(B, {
     myScore:0, oppScore:0, round:1, turnPlayer:'me',
     myActive:null, oppActive:null, myHp:0, oppHp:0,
-    myDpTotal:0, oppDpTotal:0, myHand:[], oppHand:[], phase:'kickoff',
+    myDpTotal:0, oppDpTotal:0, myHand:[], oppHand:[], phase:'deckselect',
     atkStep:'pick', myLockedAtk:null, mySupportChoiceId:'', oppSupportRevealed:null,
+    selectedDeckId:null, deckUsedThisMatch:{},
     log:[]
   });
   renderAll();
 }
+
+function getSelectedDeck(){
+  return (B.selectedDeckId!=null && DECKS[B.selectedDeckId]) ? DECKS[B.selectedDeckId] : null;
+}
+function deckRemaining(cardId){
+  const deck = getSelectedDeck();
+  if(!deck) return null; // no deck tracking active
+  const total = deck.cards[cardId]||0;
+  const used = B.deckUsedThisMatch[cardId]||0;
+  return Math.max(0, total-used);
+}
+function getRemainingDeckList(){
+  const deck = getSelectedDeck();
+  if(!deck) return [];
+  return Object.keys(deck.cards).map(id=>{
+    const card = ALL_CARDS.find(c=>String(c.id)===String(id));
+    const remaining = deckRemaining(id);
+    return card && remaining>0 ? {card, count:remaining} : null;
+  }).filter(Boolean);
+}
+function anyDeckConfigured(){ return DECKS.some(d=>d && deckTotalCount(d.cards)>0); }
 
 let handUidCounter = 0;
 function withUid(card){ return Object.assign({}, card, { _uid: card.id + '_h' + (++handUidCounter) }); }
@@ -706,7 +699,11 @@ function wireSearchBox(inputId, opts, onSelect){
   input.addEventListener('input', ()=>{
     const results = searchCards(input.value, opts);
     if(!input.value.trim()){ list.classList.remove('open'); list.innerHTML=''; return; }
-    list.innerHTML = results.map(c=>`<div class="suggest-item" data-id="${c.id}"><span class="tname">${c.name}</span><span class="ttype">${c.type==='option'?'OPTION CARD':(c.sp+' · '+c.lvl)}</span></div>`).join('') || '<div class="suggest-item">No matches</div>';
+    list.innerHTML = results.map(c=>{
+      const rem = getSelectedDeck() ? deckRemaining(c.id) : null;
+      const typeLabel = c.type==='option' ? 'OPTION CARD' : (c.sp+' · '+c.lvl);
+      return `<div class="suggest-item" data-id="${c.id}"><span class="tname">${c.name}</span><span class="ttype">${typeLabel}${rem!=null?' · '+rem+' left in deck':''}</span></div>`;
+    }).join('') || '<div class="suggest-item">No matches</div>';
     list.classList.add('open');
     list.querySelectorAll('.suggest-item[data-id]').forEach(item=>{
       item.addEventListener('click', ()=>{
@@ -722,6 +719,7 @@ function wireSearchBox(inputId, opts, onSelect){
 
 function renderPhase(){
   const el = document.getElementById('phasePanel');
+  if(B.phase==='deckselect') return renderDeckSelectPhase(el);
   if(B.phase==='kickoff') return renderKickoffPhase(el);
   if(B.phase==='draw') return renderDrawPhase(el);
   if(B.phase==='entrance') return renderEntrancePhase(el);
@@ -740,6 +738,30 @@ function renderDrawPhase(el){
       <div class="small-note">Opponent draws back up to 4 cards (their hand isn't tracked here — you'll enter what they reveal as we go).</div>
     `}
     <button class="btn" style="margin-top:14px" onclick="App.confirmDraw()">CONTINUE →</button>
+  `;
+}
+
+function renderDeckSelectPhase(el){
+  if(!anyDeckConfigured()){
+    el.innerHTML = `
+      <h2>▸ WHICH DECK?</h2>
+      <div class="small-note">No decks are set up yet (see the Deck Builder tab), so hand suggestions won't be filtered or scored against deck contents this match. You can still play normally.</div>
+      <button class="btn" style="margin-top:10px" onclick="App.skipDeckSelection()">CONTINUE →</button>
+    `;
+    return;
+  }
+  el.innerHTML = `
+    <h2>▸ WHICH DECK ARE YOU USING?</h2>
+    <div class="small-note">Selecting a deck lets the tool filter hand suggestions to cards actually in it, and score "play a random card" using what's really left in your deck.</div>
+    ${[0,1,2].map(i=>{
+      const d = DECKS[i];
+      if(!d || deckTotalCount(d.cards)===0) return '';
+      return `<div class="suggestion-rank">
+        <span><b>${d.name}</b> — ${deckTotalCount(d.cards)} cards</span>
+        <button class="btn small" onclick="App.selectDeckForMatch(${i})">USE THIS DECK</button>
+      </div>`;
+    }).join('')}
+    <button class="btn secondary small" style="margin-top:10px" onclick="App.skipDeckSelection()">DON'T TRACK A DECK THIS MATCH</button>
   `;
 }
 
@@ -791,11 +813,6 @@ function renderEntrancePhase(el){
   wireSearchBox('entranceInput', {type:'digimon'}, (card)=> applyEntranceSelection(card));
 }
 
-// DP banked now isn't wasted just because nothing in hand can spend it THIS
-// turn -- it still moves you toward whatever you draw next. Weighted toward a
-// typical Champion-tier cost (based on observed data), tapering off once
-// you're already past that threshold since the marginal value of extra
-// banked DP drops once you can already afford most things.
 function bankingBonus(currentDp, ppGained){
   if(ppGained<=0) return 0;
   const benchmark = 30;
@@ -806,10 +823,6 @@ function bankingBonus(currentDp, ppGained){
   return Math.round(effective*1.2 + overflow*0.3);
 }
 
-// Digivolving resets your active to the new form's full HP -- so when your
-// current active is already low, banked DP isn't just progress toward a
-// bigger body someday, it's a live escape hatch from a likely KO next hit.
-// Scale the banking bonus up sharply as HP gets dangerous.
 function urgencyMultiplier(myHp, myMaxHp){
   if(!myMaxHp || myHp==null) return 1;
   const pct = myHp/myMaxHp;
@@ -824,9 +837,6 @@ function rankSacrificeOptions(myActive, myDpTotal, hand, myHp){
   const results = [];
   const baselineEvo = myActive ? digivolveOptions(myActive, myDpTotal, hand) : [];
   const urgency = myActive ? urgencyMultiplier(myHp, myActive.hp) : 1;
-  // Standing still has a real cost when you're endangered AND have no path to
-  // digivolve right now -- staying a fragile low-tier form while low on HP is
-  // itself a risk, not a neutral default.
   const standStillPenalty = (!baselineEvo.length && urgency>1) ? Math.round(-20*urgency) : 0;
   results.push({
     id:'', name:'— sacrifice nothing —',
@@ -1106,6 +1116,20 @@ const App = {
 
   confirmDraw(){
     B.phase = activeFor(B.turnPlayer) ? 'dp' : 'entrance';
+    renderAll();
+  },
+
+  selectDeckForMatch(i){
+    B.selectedDeckId = i;
+    B.deckUsedThisMatch = {};
+    logEvent(`Using deck: ${DECKS[i].name} (${deckTotalCount(DECKS[i].cards)} cards).`);
+    B.phase = 'kickoff';
+    renderAll();
+  },
+
+  skipDeckSelection(){
+    B.selectedDeckId = null;
+    B.phase = 'kickoff';
     renderAll();
   },
 
