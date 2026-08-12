@@ -47,11 +47,17 @@ async function saveCustomCards(){ try{ localStorage.setItem(STORAGE_PREFIX+'cust
 async function saveCollection(){ try{ localStorage.setItem(STORAGE_PREFIX+'collection', JSON.stringify(COLLECTION)); }catch(e){ console.error('Save failed:', e); } }
 async function saveDecks(){ try{ localStorage.setItem(STORAGE_PREFIX+'decks', JSON.stringify(DECKS)); }catch(e){ console.error('Save failed:', e); } }
 
+// Parses one line of pasted collection/deck text into {name, count}. Handles:
+//  "011 - Lv U - Type Fire - Meteormon - 1 Cards"   (in-game collection menu format)
+//  "2 Tyrannomon" / "Tyrannomon x2" / "Tyrannomon x 2"
+//  "1. Tyrannomon" (numbered deck list -- count implied as 1)
+//  "Tyrannomon"    (bare name -- count implied as 1)
 function parseCollectionLine(line){
   line = line.trim();
   if(!line) return null;
   let m;
-
+  // in-game collection menu format: "011 - Lv U - Type Fire - Meteormon - 1 Cards"
+  // (also tolerates "N/A" fields for Option cards with no level/type)
   if(/-\s*\d+\s*Cards?\s*$/i.exec(line)){
     const parts = line.split(/\s*-\s*/).map(p=>p.trim()).filter(p=>p.length);
     const countPart = parts[parts.length-1];
@@ -106,13 +112,23 @@ function parseNegateTag(xt){
 function isFirstStrikeXTag(xt){ return /^1st attack$/i.test((xt||"").trim()); }
 function baseVal(card, atk){ return atk==='o'?card.o: atk==='t'?card.t: card.x; }
 
+// Full official description: "If Opponent uses [X] Attack, it will miss. Then
+// you counter with opponent's [X] attack power." Triggers when THIS card's
+// owner presses Cross and the opponent happens to pick the matching attack --
+// their hit is negated and replaced with a reflect using THEIR OWN stat at
+// that attack type (which is why counter cards are always printed with X:0 --
+// the plain Cross whiff is the fallback when the condition isn't met).
 function parseCounterTag(xt){
   const m = /^(O|T|X)\s+counter$/i.exec((xt||"").trim()) || /^counter\s+(O|T|X)$/i.exec((xt||"").trim());
   return m ? m[1].toUpperCase() : null;
 }
-
+// "Attack Power becomes same as HP. HP becomes 10." -- own Cross damage is
+// replaced by current HP, then HP is set to exactly 10 after the bout resolves.
 function isCrashXTag(xt){ return /^crash$/i.test((xt||"").trim()); }
+// "Recover the same amount of HP as the damage inflicted" -- lifesteal on Cross.
 function isEatUpHpXTag(xt){ return /^eat[\s-]?up hp$/i.test((xt||"").trim()); }
+// "Opponent's Support Effect is Voided. Can't Void Option Effect." -- voids
+// the opponent's DIGIMON-card support effect specifically, not Option cards.
 function xtGrantsJamming(xt){ return /^jamming$/i.test((xt||"").trim()); }
 
 function effectiveDamage(attacker, atkKey, defender, valueKey){
@@ -174,9 +190,13 @@ function parseEffectTags(text, card){
     if(locked) tags.push({type:'lockOwnAttack', attack:locked});
   }
   if(/Opponent'?s attack changes/i.test(text)){
+    // Confirmed by play: this swaps only which damage NUMBER is used, not which
+    // button was pressed -- own X/T/O-triggered abilities still key off the
+    // original chosen attack, not the redirected one. (Disrupt Ray: O->T, T->X, X->O)
     tags.push({type:'redirectOtherAttackValue', map:{o:'t', t:'x', x:'o'}});
   }
-
+  // Common "if both attacks are the same/different" conditional prefix --
+  // applies to whatever effect(s) the rest of the sentence produced above.
   let condition = null;
   if(/If both (?:players'? )?attacks? (?:are|is) different/i.test(text)) condition = 'attacksDiffer';
   else if(/If both (?:players'? )?(?:attacks?|use the same attack)/i.test(text) && /same/i.test(text)) condition = 'attacksSame';
@@ -258,6 +278,10 @@ function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSuppo
   myDmg = Math.max(0, Math.round(myDmg));
   oppDmg = Math.max(0, Math.round(oppDmg));
 
+  // First-strike: the turn player goes first by default. The non-turn player
+  // can steal that only if the turn player does NOT also have a "1st Attack"
+  // trait -- per the official text, having it yourself voids a foe's steal
+  // attempt even though it's otherwise redundant for whoever already goes first.
   const iCanSteal = activeGrantsFirstStrike(myCard, a) || mySupportTags.some(t=>t.type==='firstStrike');
   const oppCanSteal = activeGrantsFirstStrike(oppCard, b) || oppSupportTags.some(t=>t.type==='firstStrike');
   let myGoesFirst;
@@ -278,6 +302,9 @@ function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSuppo
 
   if(hiddenBuffer) oppDmg += hiddenBuffer;
 
+  // HP-modifying effects (healing, halving, Crash's HP-to-10, Eat-up-HP
+  // lifesteal) -- these change actual HP totals, separate from the damage
+  // swing used for solver ranking. The resolver applies these to real HP.
   let myHealAmt = 0, oppHealAmt = 0, myHalve = false, oppHalve = false;
   let mySetHp = null, oppSetHp = null;
   mySupportTags.forEach(tag=>{
@@ -420,7 +447,39 @@ function rankSupportOptionsOpenInfo(myCard, oppCard, myHp, oppHp, fixedA, myHand
   }).sort((x,y)=>y.worst-x.worst);
 }
 
+// Expected value of playing a random card from what's actually left in your
+// selected deck -- weighted by remaining count, using worst-case-vs-opponent
+// for each possible random draw (randomness on your side => expectation is
+// the right lens; the opponent's response is still treated adversarially).
+// oppSupportSets: either a single known tag array, or an array of possible
+// tag arrays (e.g. from their tracked hand) to treat as opponent options too.
+function randomCardExpectedValue(myCard, oppCard, myHp, oppHp, fixedA, oppSupportSets, hiddenBuffer, iAmTurnPlayer){
+  const remaining = getRemainingDeckList();
+  if(!remaining.length) return null;
+  const sets = (oppSupportSets.length && Array.isArray(oppSupportSets[0])) ? oppSupportSets : [oppSupportSets||[]];
+  const total = remaining.reduce((s,r)=>s+r.count, 0);
+  let weightedSum = 0;
+  remaining.forEach(({card, count})=>{
+    const tags = parseEffectTags(effectText(card), card);
+    let worst = Infinity;
+    ['o','t','x'].forEach(b=>{
+      sets.forEach(oppTags=>{
+        const cell = computeCell(myCard, oppCard, myHp, oppHp, fixedA, b, tags, oppTags, hiddenBuffer||0, iAmTurnPlayer);
+        const net = cell.myDmg - cell.oppDmg;
+        if(net<worst) worst = net;
+      });
+    });
+    weightedSum += worst * count;
+  });
+  return { ev: Math.round(weightedSum/total), poolSize: total };
+}
+
 // ============================= DECK GENERATION =============================
+// Heuristic, not a proven-optimal solver: scores owned cards by combat value
+// plus a "specialty depth" bonus (more owned cards in one specialty = more
+// likely to have real digivolve-chain coverage there), always includes owned
+// Partner-line cards, then fills toward a ~23 Digimon / ~7 Option split
+// (roughly matching a typical starter deck's ratio) while respecting owned counts.
 function scoreDigimonForDeck(card, specialtyDepth){
   const eff = effectQualityNote(card);
   const avgAtk = (card.o+card.t+card.x)/3;
@@ -644,6 +703,9 @@ function renderHeader(){
 
 function renderStatePanel(){
   const el = document.getElementById('statePanel');
+  const deck = getSelectedDeck();
+  const remainingList = deck ? getRemainingDeckList() : [];
+  const remainingTotal = remainingList.reduce((s,r)=>s+r.count,0);
   el.innerHTML = `
     <div class="row">
       <div class="col"><label>YOUR ACTIVE</label>${cardMiniPreview(B.myActive, B.myHp)}</div>
@@ -652,6 +714,8 @@ function renderStatePanel(){
     <div class="row">
       <div class="col">
         <label>YOUR HAND (add cards as you draw them — duplicates are fine, e.g. two Agumon)</label>
+        ${deck ? `<div class="small-note">Using <b>${deck.name}</b> — ${remainingTotal} of ${deckTotalCount(deck.cards)} cards not yet drawn.
+          <label style="display:inline;margin:0 0 0 10px"><input type="checkbox" id="handIgnoreDeckFilter" style="width:auto;vertical-align:middle"> search all cards, not just this deck</label></div>` : ''}
         <div class="search-box">
           <input id="handSearch" placeholder="Type a card name..." autocomplete="off">
           <div class="suggest-list" id="handSearch_list"></div>
@@ -672,12 +736,15 @@ function renderStatePanel(){
       </div>
     </div>
   `;
-  wireSearchBox('handSearch', {}, (card)=>{
+  const ignoreFilterBox = document.getElementById('handIgnoreDeckFilter');
+  wireSearchBox('handSearch', { onlyInDeck: !!(deck && ignoreFilterBox && !ignoreFilterBox.checked) }, (card)=>{
     if(B.myHand.length>=4){ alert('Hand is already at 4 cards.'); return; }
     B.myHand.push(withUid(card));
+    if(deck){ B.deckUsedThisMatch[card.id] = (B.deckUsedThisMatch[card.id]||0) + 1; }
     renderStatePanel();
     renderPhase();
   });
+  if(ignoreFilterBox) ignoreFilterBox.addEventListener('change', renderStatePanel);
   wireSearchBox('oppHandSearch', {}, (card)=>{
     if(B.oppHand.length>=4){ alert("Opponent's hand is already at 4 cards."); return; }
     B.oppHand.push(withUid(card));
@@ -813,6 +880,11 @@ function renderEntrancePhase(el){
   wireSearchBox('entranceInput', {type:'digimon'}, (card)=> applyEntranceSelection(card));
 }
 
+// DP banked now isn't wasted just because nothing in hand can spend it THIS
+// turn -- it still moves you toward whatever you draw next. Weighted toward a
+// typical Champion-tier cost (based on observed data), tapering off once
+// you're already past that threshold since the marginal value of extra
+// banked DP drops once you can already afford most things.
 function bankingBonus(currentDp, ppGained){
   if(ppGained<=0) return 0;
   const benchmark = 30;
@@ -823,6 +895,10 @@ function bankingBonus(currentDp, ppGained){
   return Math.round(effective*1.2 + overflow*0.3);
 }
 
+// Digivolving resets your active to the new form's full HP -- so when your
+// current active is already low, banked DP isn't just progress toward a
+// bigger body someday, it's a live escape hatch from a likely KO next hit.
+// Scale the banking bonus up sharply as HP gets dangerous.
 function urgencyMultiplier(myHp, myMaxHp){
   if(!myMaxHp || myHp==null) return 1;
   const pct = myHp/myMaxHp;
@@ -837,6 +913,9 @@ function rankSacrificeOptions(myActive, myDpTotal, hand, myHp){
   const results = [];
   const baselineEvo = myActive ? digivolveOptions(myActive, myDpTotal, hand) : [];
   const urgency = myActive ? urgencyMultiplier(myHp, myActive.hp) : 1;
+  // Standing still has a real cost when you're endangered AND have no path to
+  // digivolve right now -- staying a fragile low-tier form while low on HP is
+  // itself a risk, not a neutral default.
   const standStillPenalty = (!baselineEvo.length && urgency>1) ? Math.round(-20*urgency) : 0;
   results.push({
     id:'', name:'— sacrifice nothing —',
@@ -1010,6 +1089,7 @@ function renderAttackPhase(el){
     const ranked = rankSupportOptions(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, B.myHand, oppTags, 0, iAmTurnPlayer);
     const redirectTag = oppTags.find(t=>t.type==='redirectOtherAttackValue');
     const redirectWarning = redirectTag ? `<div class="warn-box">${B.oppSupportRevealed.name} redirects your locked ${B.myLockedAtk.toUpperCase()} to use <b>${redirectTag.map[B.myLockedAtk].toUpperCase()}'s damage number</b> instead. Any support you pick that boosts/doubles "${B.myLockedAtk.toUpperCase()}" still applies — it checks which button you pressed, not which number came out — so it's scored against the redirected value below, not wasted.</div>` : '';
+    const randomEv = getSelectedDeck() ? randomCardExpectedValue(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppTags, 0, iAmTurnPlayer) : null;
     el.innerHTML = `
       <h2>▸ YOUR SUPPORT (REACTING)</h2>
       <div class="small-note">You locked ${B.myLockedAtk.toUpperCase()}. Opponent's support: <b>${B.oppSupportRevealed?B.oppSupportRevealed.name:'none'}</b>. Ranked by worst-case outcome against their 3 possible attacks:</div>
@@ -1021,7 +1101,8 @@ function renderAttackPhase(el){
           <button class="btn small secondary" onclick="App.pickMySupport('${r.id}')">USE</button>
         </div>`).join('')}
       <div class="suggestion-rank">
-        <span>Play a random card from my deck<br><span class="small-note">Unknown effect — can't be scored, this is a genuine gamble.</span></span>
+        <span>Play a random card from my deck<br><span class="small-note">${randomEv ? `Expected value across the ${randomEv.poolSize} cards still unaccounted for in your tracked deck.` : "Unknown effect — can't be scored (select a deck to get a real estimate here)."}</span></span>
+        ${randomEv ? `<span class="val">~${randomEv.ev>=0?'+':''}${randomEv.ev}</span>` : ''}
         <button class="btn small secondary" onclick="App.pickMySupport('__random__')">USE</button>
       </div>
     `;
@@ -1030,6 +1111,8 @@ function renderAttackPhase(el){
 
   if(B.atkStep==='myBlindSupport'){
     const ranked = rankSupportOptionsOpenInfo(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, B.myHand, B.oppHand, iAmTurnPlayer);
+    const oppPossibleSets = [[]].concat(B.oppHand.map(c=>parseEffectTags(effectText(c), c)));
+    const randomEv = getSelectedDeck() ? randomCardExpectedValue(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppPossibleSets, 0, iAmTurnPlayer) : null;
     el.innerHTML = `
       <h2>▸ YOUR SUPPORT (COMMITTING BLIND)</h2>
       <div class="small-note">It's the opponent's turn, so you (non-turn player) must commit support first. You locked ${B.myLockedAtk.toUpperCase()}. Since their hand is visible, this is the true worst case across all 3 of their attacks and every support card actually in their hand (${B.oppHand.length} tracked) — not a guess.</div>
@@ -1041,7 +1124,8 @@ function renderAttackPhase(el){
             <button class="btn small secondary" onclick="App.pickMySupport('${r.id}')">USE</button>
           </div>`).join('')}
         <div class="suggestion-rank">
-          <span>Play a random card from my deck<br><span class="small-note">Unknown effect — can't be scored, this is a genuine gamble.</span></span>
+          <span>Play a random card from my deck<br><span class="small-note">${randomEv ? `Expected value across the ${randomEv.poolSize} cards still unaccounted for in your tracked deck.` : "Unknown effect — can't be scored (select a deck to get a real estimate here)."}</span></span>
+          ${randomEv ? `<span class="val">~${randomEv.ev>=0?'+':''}${randomEv.ev}</span>` : ''}
           <button class="btn small secondary" onclick="App.pickMySupport('__random__')">USE</button>
         </div>
       </div>
