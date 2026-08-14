@@ -1090,21 +1090,23 @@ function renderAttackPhase(el){
     const redirectTag = oppTags.find(t=>t.type==='redirectOtherAttackValue');
     const redirectWarning = redirectTag ? `<div class="warn-box">${B.oppSupportRevealed.name} redirects your locked ${B.myLockedAtk.toUpperCase()} to use <b>${redirectTag.map[B.myLockedAtk].toUpperCase()}'s damage number</b> instead. Any support you pick that boosts/doubles "${B.myLockedAtk.toUpperCase()}" still applies — it checks which button you pressed, not which number came out — so it's scored against the redirected value below, not wasted.</div>` : '';
     const randomEv = getSelectedDeck() ? randomCardExpectedValue(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppTags, 0, iAmTurnPlayer) : null;
+    const combined = ranked.map(r=>({id:r.id, name:r.name, val:r.worst, note:null}));
+    if(randomEv){
+      combined.push({id:'__random__', name:'Play a random card from my deck', val:randomEv.ev, note:`Expected value across the ${randomEv.poolSize} cards still unaccounted for in your tracked deck.`, approx:true});
+    } else {
+      combined.push({id:'__random__', name:'Play a random card from my deck', val:null, note:"Unknown effect — can't be scored (select a deck to get a real estimate here)."});
+    }
+    combined.sort((a,b)=>(b.val==null?-Infinity:b.val)-(a.val==null?-Infinity:a.val));
     el.innerHTML = `
       <h2>▸ YOUR SUPPORT (REACTING)</h2>
       <div class="small-note">You locked ${B.myLockedAtk.toUpperCase()}. Opponent's support: <b>${B.oppSupportRevealed?B.oppSupportRevealed.name:'none'}</b>. Ranked by worst-case outcome against their 3 possible attacks:</div>
       ${redirectWarning}
-      ${ranked.map((r,i)=>`
+      ${combined.map((r,i)=>`
         <div class="suggestion-rank ${i===0?'top':''}">
-          <span>${r.name}</span>
-          <span class="val">${r.worst>=0?'+':''}${r.worst}</span>
+          <span>${r.name}${r.note?'<br><span class="small-note">'+r.note+'</span>':''}</span>
+          ${r.val!=null ? `<span class="val">${r.approx?'~':''}${r.val>=0?'+':''}${r.val}</span>` : ''}
           <button class="btn small secondary" onclick="App.pickMySupport('${r.id}')">USE</button>
         </div>`).join('')}
-      <div class="suggestion-rank">
-        <span>Play a random card from my deck<br><span class="small-note">${randomEv ? `Expected value across the ${randomEv.poolSize} cards still unaccounted for in your tracked deck.` : "Unknown effect — can't be scored (select a deck to get a real estimate here)."}</span></span>
-        ${randomEv ? `<span class="val">~${randomEv.ev>=0?'+':''}${randomEv.ev}</span>` : ''}
-        <button class="btn small secondary" onclick="App.pickMySupport('__random__')">USE</button>
-      </div>
     `;
     return;
   }
@@ -1113,21 +1115,23 @@ function renderAttackPhase(el){
     const ranked = rankSupportOptionsOpenInfo(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, B.myHand, B.oppHand, iAmTurnPlayer);
     const oppPossibleSets = [[]].concat(B.oppHand.map(c=>parseEffectTags(effectText(c), c)));
     const randomEv = getSelectedDeck() ? randomCardExpectedValue(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppPossibleSets, 0, iAmTurnPlayer) : null;
+    const combined = ranked.map(r=>({id:r.id, name:r.name, val:r.worst, note:null}));
+    if(randomEv){
+      combined.push({id:'__random__', name:'Play a random card from my deck', val:randomEv.ev, note:`Expected value across the ${randomEv.poolSize} cards still unaccounted for in your tracked deck.`, approx:true});
+    } else {
+      combined.push({id:'__random__', name:'Play a random card from my deck', val:null, note:"Unknown effect — can't be scored (select a deck to get a real estimate here)."});
+    }
+    combined.sort((a,b)=>(b.val==null?-Infinity:b.val)-(a.val==null?-Infinity:a.val));
     el.innerHTML = `
       <h2>▸ YOUR SUPPORT (COMMITTING BLIND)</h2>
       <div class="small-note">It's the opponent's turn, so you (non-turn player) must commit support first. You locked ${B.myLockedAtk.toUpperCase()}. Since their hand is visible, this is the true worst case across all 3 of their attacks and every support card actually in their hand (${B.oppHand.length} tracked) — not a guess.</div>
       <div id="rankedSupportList">
-        ${ranked.map((r,i)=>`
+        ${combined.map((r,i)=>`
           <div class="suggestion-rank ${i===0?'top':''}">
-            <span>${r.name}</span>
-            <span class="val">${r.worst>=0?'+':''}${r.worst}</span>
+            <span>${r.name}${r.note?'<br><span class="small-note">'+r.note+'</span>':''}</span>
+            ${r.val!=null ? `<span class="val">${r.approx?'~':''}${r.val>=0?'+':''}${r.val}</span>` : ''}
             <button class="btn small secondary" onclick="App.pickMySupport('${r.id}')">USE</button>
           </div>`).join('')}
-        <div class="suggestion-rank">
-          <span>Play a random card from my deck<br><span class="small-note">${randomEv ? `Expected value across the ${randomEv.poolSize} cards still unaccounted for in your tracked deck.` : "Unknown effect — can't be scored (select a deck to get a real estimate here)."}</span></span>
-          ${randomEv ? `<span class="val">~${randomEv.ev>=0?'+':''}${randomEv.ev}</span>` : ''}
-          <button class="btn small secondary" onclick="App.pickMySupport('__random__')">USE</button>
-        </div>
       </div>
       ${B.oppHand.length===0 ? '<div class="warn-box">Opponent\u2019s tracked hand is empty — if that\u2019s not actually true, add their cards in the panel above before trusting this ranking.</div>' : ''}
     `;
