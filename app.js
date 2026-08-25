@@ -958,6 +958,122 @@ function renderDpPhase(el){
   const isMe = B.turnPlayer==='me';
   const active = activeFor(B.turnPlayer);
   const dpTotal = isMe ? B.myDpTotal : B.oppDpTotal;
+
+  if(!isMe){
+    const oppEvoPreview = active ? digivolveOptions(active, dpTotal, B.oppHand) : [];
+    el.innerHTML = `
+      <h2>▸ DP PHASE (OPPONENT'S TURN)</h2>
+      <div class="small-note">Sacrificing for DP and digivolving in the same turn are both allowed together.</div>
+      <label>DID THE OPPONENT SACRIFICE A CARD? (pick from their tracked hand)</label>
+      <select id="oppSacSelect">
+        <option value="">— none —</option>
+        ${B.oppHand.filter(c=>c.type==='digimon').map(c=>`<option value="${c._uid}">${c.name} (+${c.pp||0} DP)</option>`).join('')}
+      </select>
+      <button class="btn small" style="margin-top:8px" onclick="App.doOppSacrifice()">CONFIRM SACRIFICE</button>
+      <div class="small-note" style="margin-top:6px">If their hand isn't fully tracked yet, you can enter it manually instead:</div>
+      <div class="search-box"><input id="oppSacInput" placeholder="Card name" autocomplete="off"><div class="suggest-list" id="oppSacInput_list"></div></div>
+      <input type="number" id="oppSacAmount" placeholder="DP gained, if typing a name not in their tracked hand">
+      ${oppEvoPreview.length ? `
+        <h2 style="margin-top:16px">▸ WHAT THEY COULD DIGIVOLVE INTO (${dpTotal} DP banked)</h2>
+        ${oppEvoPreview.map(c=>`
+          <div class="suggestion-rank">
+            <span><b>${c.name}</b> (${c.lvl}, needs ${c.dp} DP) — HP ${c.hp}, O ${c.o}/T ${c.t}/X ${c.x}</span>
+            <button class="btn small secondary" onclick="App.doOppDigivolve('${c._uid}')">THEY DID THIS</button>
+          </div>
+        `).join('')}
+      ` : `<h2 style="margin-top:16px">▸ DID OPPONENT DIGIVOLVE?</h2><div class="small-note">Nothing in their tracked hand is eligible at ${dpTotal} DP.</div>`}
+      <label style="margin-top:10px">OR ENTER MANUALLY</label>
+      <div class="search-box"><input id="oppEvoInput" placeholder="New form, if any" autocomplete="off"><div class="suggest-list" id="oppEvoInput_list"></div></div>
+      <button class="btn" style="margin-top:16px" onclick="App.confirmDpDone()">CONTINUE →</button>
+    `;
+    wireSearchBox('oppSacInput', {}, (card)=>{
+      document.getElementById('oppSacInput').value = card.name;
+      document.getElementById('oppSacAmount').value = card.pp||0;
+    });
+    wireSearchBox('oppEvoInput', {type:'digimon'}, (card)=>{
+      B.oppActive = Object.assign({}, card); B.oppHp = card.hp;
+      removeFromOppHand(card.id);
+      B.oppDpTotal = 0;
+      document.getElementById('oppEvoInput').value = card.name;
+      logEvent(`Opponent digivolved to ${card.name} (DP counter spent, reset to 0).`);
+    });
+    return;
+  }
+
+  if(!B.dpStep) B.dpStep = 'sacrifice';
+  if(B.dpStep==='digivolve'){
+    const evoOptions = digivolveOptions(active, dpTotal, B.myHand);
+    if(!evoOptions.length) B.dpStep = 'speedDigivolve';
+  }
+  if(B.dpStep==='speedDigivolve'){
+    const speedCard = findSpeedDigivolveCard(B.myHand);
+    const speedOptions = speedCard ? speedDigivolveOptions(active, B.myHand.filter(c=>c._uid!==speedCard._uid)) : [];
+    if(!speedCard || !speedOptions.length) B.dpStep = 'done';
+  }
+
+  if(B.dpStep==='sacrifice') return renderDpSacrificeStep(el, active, dpTotal);
+  if(B.dpStep==='digivolve') return renderDpDigivolveStep(el, active, dpTotal);
+  if(B.dpStep==='speedDigivolve') return renderDpSpeedDigivolveStep(el, active, dpTotal);
+  return renderDpDoneStep(el, active, dpTotal);
+}
+
+function renderDpSacrificeStep(el, active, dpTotal){
+  const sacRanked = rankSacrificeOptions(active, dpTotal, B.myHand, B.myHp);
+  el.innerHTML = `
+    <h2>▸ DP PHASE — STEP 1/3: SACRIFICE</h2>
+    <div class="small-note">Sacrificing for DP and digivolving in the same turn are both allowed together. Pick one, or skip — either way this moves you to the next step.</div>
+    <label>SACRIFICE ADVISOR (ranked by DP gained vs. what you'd give up)</label>
+    ${sacRanked.map((r,i)=>`
+      <div class="suggestion-rank ${i===0?'top':''}">
+        <span>${r.name}<br><span class="small-note">${r.note}</span></span>
+        <button class="btn small secondary" onclick="App.doSacrifice('${r.id}')">${r.id?'SACRIFICE':'SKIP'}</button>
+      </div>`).join('')}
+  `;
+}
+
+function renderDpDigivolveStep(el, active, dpTotal){
+  const evoOptions = digivolveOptions(active, dpTotal, B.myHand);
+  el.innerHTML = `
+    <h2>▸ DP PHASE — STEP 2/3: DIGIVOLVE (current DP: ${dpTotal})</h2>
+    <div class="small-note">Eligible now that your DP is banked. Pick one, or skip.</div>
+    ${evoOptions.map(c=>`
+      <div class="suggestion-rank">
+        <span><b>${c.name}</b> (${c.lvl}, needs ${c.dp} DP) — HP ${c.hp}, O ${c.o}/T ${c.t}/X ${c.x}</span>
+        <button class="btn small" onclick="App.doDigivolve('${c._uid}')">DIGIVOLVE</button>
+      </div>
+    `).join('')}
+    <button class="btn secondary small" style="margin-top:10px" onclick="App.skipDigivolveStep()">SKIP</button>
+  `;
+}
+
+function renderDpSpeedDigivolveStep(el, active, dpTotal){
+  const speedCard = findSpeedDigivolveCard(B.myHand);
+  const speedOptions = speedDigivolveOptions(active, B.myHand.filter(c=>c._uid!==speedCard._uid));
+  el.innerHTML = `
+    <h2>▸ DP PHASE — STEP 3/3: SPEED DIGIVOLVE (${speedCard.name} in hand — ignores DP cost)</h2>
+    <div class="small-note">Pick one, or skip.</div>
+    ${speedOptions.map(c=>`
+      <div class="suggestion-rank">
+        <span><b>${c.name}</b> (${c.lvl}, DP cost waived) — HP ${c.hp}, O ${c.o}/T ${c.t}/X ${c.x}</span>
+        <button class="btn small" onclick="App.doSpeedDigivolve('${c._uid}')">SPEED DIGIVOLVE</button>
+      </div>
+    `).join('')}
+    <button class="btn secondary small" style="margin-top:10px" onclick="App.skipSpeedDigivolveStep()">SKIP</button>
+  `;
+}
+
+function renderDpDoneStep(el, active, dpTotal){
+  el.innerHTML = `
+    <h2>▸ DP PHASE COMPLETE</h2>
+    <div class="small-note">Active: <b>${active.name}</b> — DP banked: <b>${dpTotal}</b></div>
+    <button class="btn" style="margin-top:12px" onclick="App.confirmDpDone()">CONTINUE →</button>
+  `;
+}
+
+
+  const isMe = B.turnPlayer==='me';
+  const active = activeFor(B.turnPlayer);
+  const dpTotal = isMe ? B.myDpTotal : B.oppDpTotal;
   const evoOptions = (isMe && active) ? digivolveOptions(active, dpTotal, B.myHand) : [];
   const sacRanked = (isMe && active) ? rankSacrificeOptions(active, dpTotal, B.myHand, B.myHp) : [];
   const oppEvoPreview = (!isMe && active) ? digivolveOptions(active, dpTotal, B.oppHand) : [];
