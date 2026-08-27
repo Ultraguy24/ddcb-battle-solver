@@ -647,6 +647,7 @@ function activeFor(player){ return player==='me' ? B.myActive : B.oppActive; }
 function beginTurnPhaseFor(player){
   B.turnPlayer = player;
   B.phase = 'draw';
+  B.dpStep = null;
 }
 
 function endTurnAndAdvance(){
@@ -1293,14 +1294,25 @@ const App = {
   },
 
   doSacrifice(id){
-    if(!id){ logEvent('You chose not to sacrifice this turn.'); renderDpPhase(document.getElementById('phasePanel')); return; }
+    if(!id){ logEvent('You chose not to sacrifice this turn.'); B.dpStep = 'digivolve'; renderDpPhase(document.getElementById('phasePanel')); return; }
     const card = findInHand(B.myHand, id);
     if(!card) return;
     B.myDpTotal += (card.pp||0);
     removeFromHand(card._uid||card.id);
     logEvent(`You sacrificed ${card.name} for +${card.pp||0} DP (total ${B.myDpTotal}).`);
+    B.dpStep = 'digivolve';
     renderDpPhase(document.getElementById('phasePanel'));
     renderStatePanel(); renderHeader();
+  },
+
+  skipDigivolveStep(){
+    B.dpStep = 'speedDigivolve';
+    renderDpPhase(document.getElementById('phasePanel'));
+  },
+
+  skipSpeedDigivolveStep(){
+    B.dpStep = 'done';
+    renderDpPhase(document.getElementById('phasePanel'));
   },
 
   doOppSacrifice(){
