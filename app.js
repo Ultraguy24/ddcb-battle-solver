@@ -251,40 +251,15 @@ function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSuppo
   const myCountering = myCounter && myCounter.toLowerCase()===b;
   const oppCountering = oppCounter && oppCounter.toLowerCase()===a;
 
-  // Crash: "Attack Power becomes same as HP. HP becomes 10."
+  // Crash: "Attack Power becomes same as HP. HP becomes 10. No Effect until
+  // just before attack." -- the "just before attack" clause means Crash's
+  // power is evaluated at the moment THAT SIDE actually throws its attack,
+  // not at the start of the bout. If the crasher goes second, that's their
+  // HP *after* taking the first attacker's hit.
   const myCrashing = a==='x' && isCrashXTag(myCard.xt);
   const oppCrashing = b==='x' && isCrashXTag(oppCard.xt);
 
-  let myDmg = myCountering ? baseVal(oppCard, b) : (myCrashing ? myHp : effectiveDamage(myCard, a, oppCard, aVal));
-  let oppDmg = oppCountering ? baseVal(myCard, a) : (oppCrashing ? oppHp : effectiveDamage(oppCard, b, myCard, bVal));
-
-  mySupportTags.forEach(tag=>{
-    if(tag.type==='boostOwnAttack') myDmg += tag.amount;
-    if(tag.type==='boostOwnAttackSpecific' && tag.attack===a) myDmg += tag.amount;
-    if(tag.type==='doubleOwnAttack' && tag.attack===a) myDmg *= 2;
-    if(tag.type==='multiplyOwnAttack') myDmg *= tag.mult;
-    if(tag.type==='zeroOppAttack' && (!tag.attack || tag.attack===b)) oppDmg = 0;
-  });
-  oppSupportTags.forEach(tag=>{
-    if(tag.type==='boostOwnAttack') oppDmg += tag.amount;
-    if(tag.type==='boostOwnAttackSpecific' && tag.attack===b) oppDmg += tag.amount;
-    if(tag.type==='doubleOwnAttack' && tag.attack===b) oppDmg *= 2;
-    if(tag.type==='multiplyOwnAttack') oppDmg *= tag.mult;
-    if(tag.type==='zeroOppAttack' && (!tag.attack || tag.attack===a)) myDmg = 0;
-  });
-
-  if(myCountering) oppDmg = 0; // their matching attack "misses"
-  if(oppCountering) myDmg = 0;
-  if(a==='x'){ const neg=parseNegateTag(myCard.xt); if(neg && neg.toLowerCase()===b) oppDmg=0; }
-  if(b==='x'){ const neg=parseNegateTag(oppCard.xt); if(neg && neg.toLowerCase()===a) myDmg=0; }
-
-  myDmg = Math.max(0, Math.round(myDmg));
-  oppDmg = Math.max(0, Math.round(oppDmg));
-
-  // First-strike: the turn player goes first by default. The non-turn player
-  // can steal that only if the turn player does NOT also have a "1st Attack"
-  // trait -- per the official text, having it yourself voids a foe's steal
-  // attempt even though it's otherwise redundant for whoever already goes first.
+  // First-strike order must be known before Crash power can be evaluated.
   const iCanSteal = activeGrantsFirstStrike(myCard, a) || mySupportTags.some(t=>t.type==='firstStrike');
   const oppCanSteal = activeGrantsFirstStrike(oppCard, b) || oppSupportTags.some(t=>t.type==='firstStrike');
   let myGoesFirst;
@@ -296,6 +271,48 @@ function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSuppo
     const turnPlayerGoesFirst = !(nonTurnPlayerHasFirst && !turnPlayerHasFirst);
     myGoesFirst = iAmTurnPlayer ? turnPlayerGoesFirst : !turnPlayerGoesFirst;
   }
+
+  function applyBoosts(base, isMine){
+    let dmg = base;
+    const tags = isMine ? mySupportTags : oppSupportTags;
+    const atk = isMine ? a : b;
+    tags.forEach(tag=>{
+      if(tag.type==='boostOwnAttack') dmg += tag.amount;
+      if(tag.type==='boostOwnAttackSpecific' && tag.attack===atk) dmg += tag.amount;
+      if(tag.type==='doubleOwnAttack' && tag.attack===atk) dmg *= 2;
+      if(tag.type==='multiplyOwnAttack') dmg *= tag.mult;
+    });
+    return Math.max(0, dmg);
+  }
+
+  let myDmg, oppDmg;
+  if(myGoesFirst===true){
+    myDmg = applyBoosts(myCountering ? baseVal(oppCard, b) : (myCrashing ? myHp : effectiveDamage(myCard, a, oppCard, aVal)), true);
+    const oppHpAfterMyHit = oppCrashing ? Math.max(0, oppHp - myDmg) : oppHp;
+    oppDmg = (oppCrashing && oppHpAfterMyHit<=0) ? 0 :
+      applyBoosts(oppCountering ? baseVal(myCard, a) : (oppCrashing ? oppHpAfterMyHit : effectiveDamage(oppCard, b, myCard, bVal)), false);
+  } else if(myGoesFirst===false){
+    oppDmg = applyBoosts(oppCountering ? baseVal(myCard, a) : (oppCrashing ? oppHp : effectiveDamage(oppCard, b, myCard, bVal)), false);
+    const myHpAfterOppHit = myCrashing ? Math.max(0, myHp - oppDmg) : myHp;
+    myDmg = (myCrashing && myHpAfterOppHit<=0) ? 0 :
+      applyBoosts(myCountering ? baseVal(oppCard, b) : (myCrashing ? myHpAfterOppHit : effectiveDamage(myCard, a, oppCard, aVal)), true);
+  } else {
+    // Simultaneous, no established order -- each side's Crash power (if any)
+    // uses their own pre-bout HP, since neither has attacked yet.
+    myDmg = applyBoosts(myCountering ? baseVal(oppCard, b) : (myCrashing ? myHp : effectiveDamage(myCard, a, oppCard, aVal)), true);
+    oppDmg = applyBoosts(oppCountering ? baseVal(myCard, a) : (oppCrashing ? oppHp : effectiveDamage(oppCard, b, myCard, bVal)), false);
+  }
+
+  mySupportTags.forEach(tag=>{ if(tag.type==='zeroOppAttack' && (!tag.attack || tag.attack===b)) oppDmg = 0; });
+  oppSupportTags.forEach(tag=>{ if(tag.type==='zeroOppAttack' && (!tag.attack || tag.attack===a)) myDmg = 0; });
+
+  if(myCountering) oppDmg = 0; // their matching attack "misses"
+  if(oppCountering) myDmg = 0;
+  if(a==='x'){ const neg=parseNegateTag(myCard.xt); if(neg && neg.toLowerCase()===b) oppDmg=0; }
+  if(b==='x'){ const neg=parseNegateTag(oppCard.xt); if(neg && neg.toLowerCase()===a) myDmg=0; }
+
+  myDmg = Math.max(0, Math.round(myDmg));
+  oppDmg = Math.max(0, Math.round(oppDmg));
 
   if(myGoesFirst===true){
     if(myDmg>=oppHp) oppDmg=0;
