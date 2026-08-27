@@ -195,6 +195,9 @@ function parseEffectTags(text, card){
     // original chosen attack, not the redirected one. (Disrupt Ray: O->T, T->X, X->O)
     tags.push({type:'redirectOtherAttackValue', map:{o:'t', t:'x', x:'o'}});
   }
+  if(m = /Draw\s*(\d*)\s*cards?/i.exec(text)){
+    tags.push({type:'drawCards', amount: m[1] ? parseInt(m[1]) : 1});
+  }
   // Common "if both attacks are the same/different" conditional prefix --
   // applies to whatever effect(s) the rest of the sentence produced above.
   let condition = null;
@@ -1202,6 +1205,37 @@ function renderAttackPhase(el){
     return;
   }
 
+  if(B.atkStep==='declareDraw'){
+    const needMe = (B.pendingMyDraw||0) > 0;
+    const needOpp = (B.pendingOppDraw||0) > 0;
+    el.innerHTML = `
+      <h2>▸ SUPPORT DRAW EFFECT${(B.pendingMyDraw+B.pendingOppDraw)>1?'S':''}</h2>
+      <div class="small-note">A support card played this bout draws a card. Declare what was drawn so hand tracking stays accurate.</div>
+      ${needMe ? `
+        <label style="margin-top:10px">YOU DREW (${B.pendingMyDraw} remaining) — search for the card</label>
+        <div class="search-box"><input id="myDrawInput" placeholder="Card name" autocomplete="off"><div class="suggest-list" id="myDrawInput_list"></div></div>
+        <button class="btn small" style="margin-top:6px" onclick="App.declareMyDrawCard()">ADD TO MY HAND</button>
+        <button class="btn small secondary" style="margin-top:6px" onclick="App.skipDrawDeclare('me')">SKIP (DON'T KNOW)</button>
+      ` : ''}
+      ${needOpp ? `
+        <label style="margin-top:14px">OPPONENT DREW (${B.pendingOppDraw} remaining) — search for the card</label>
+        <div class="search-box"><input id="oppDrawInput" placeholder="Card name" autocomplete="off"><div class="suggest-list" id="oppDrawInput_list"></div></div>
+        <button class="btn small" style="margin-top:6px" onclick="App.declareOppDrawCard()">ADD TO THEIR TRACKED HAND</button>
+        <button class="btn small secondary" style="margin-top:6px" onclick="App.skipDrawDeclare('opp')">SKIP (DON'T KNOW)</button>
+      ` : ''}
+      ${(!needMe && !needOpp) ? `<button class="btn" style="margin-top:14px" onclick="App.finishDrawDeclare()">CONTINUE →</button>` : ''}
+    `;
+    if(needMe) wireSearchBox('myDrawInput', {}, (card)=>{
+      document.getElementById('myDrawInput').value = card.name;
+      App._pendingMyDrawCard = card;
+    });
+    if(needOpp) wireSearchBox('oppDrawInput', {}, (card)=>{
+      document.getElementById('oppDrawInput').value = card.name;
+      App._pendingOppDrawCard = card;
+    });
+    return;
+  }
+
   if(B.atkStep==='resolve'){
     const mySupportCard = (B.mySupportChoiceId && B.mySupportChoiceId!=='__random__') ? findInHand(B.myHand, B.mySupportChoiceId) : null;
     const myWasRandom = B.mySupportChoiceId==='__random__';
@@ -1529,6 +1563,46 @@ const App = {
     }
 
     B.myLockedAtk=null; B.mySupportChoiceId=''; B.oppSupportRevealed=null;
+
+    const myDrawAmt = mySupportTags.filter(t=>t.type==='drawCards').reduce((s,t)=>s+t.amount,0);
+    const oppDrawAmt = oppSupportTags.filter(t=>t.type==='drawCards').reduce((s,t)=>s+t.amount,0);
+    if(myDrawAmt>0 || oppDrawAmt>0){
+      B.pendingMyDraw = myDrawAmt; B.pendingOppDraw = oppDrawAmt;
+      B.atkStep = 'declareDraw';
+      renderAll();
+      return;
+    }
+    endTurnAndAdvance();
+  },
+
+  declareMyDrawCard(){
+    const card = App._pendingMyDrawCard;
+    if(!card){ logEvent('Pick a card first.'); return; }
+    B.myHand.push(withUid(card));
+    logEvent(`You drew ${card.name} (from support draw effect) — added to hand.`);
+    App._pendingMyDrawCard = null;
+    B.pendingMyDraw--;
+    renderAll();
+  },
+
+  declareOppDrawCard(){
+    const card = App._pendingOppDrawCard;
+    if(!card){ logEvent('Pick a card first.'); return; }
+    B.oppHand.push(withUid(card));
+    logEvent(`Opponent drew ${card.name} (from support draw effect) — added to their tracked hand.`);
+    App._pendingOppDrawCard = null;
+    B.pendingOppDraw--;
+    renderAll();
+  },
+
+  skipDrawDeclare(who){
+    if(who==='me') B.pendingMyDraw = 0; else B.pendingOppDraw = 0;
+    logEvent(`${who==='me'?'You':'Opponent'} drew a card from a support effect, but its identity wasn't declared — hand size may be under-tracked from here.`);
+    renderAll();
+  },
+
+  finishDrawDeclare(){
+    B.atkStep = null;
     endTurnAndAdvance();
   }
 };
