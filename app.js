@@ -235,12 +235,15 @@ function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSuppo
   mySupportTags.forEach(tag=>{ if(tag.type==='lockOwnAttack'){ a = tag.attack; } });
   oppSupportTags.forEach(tag=>{ if(tag.type==='lockOwnAttack'){ b = tag.attack; } });
 
-  // Value-only redirects (e.g. Disrupt Ray): change which damage NUMBER is used
-  // without changing which attack was actually "pressed" -- own-attack-triggered
-  // abilities (negation, foe multipliers, first strike) still key off a/b as-is.
-  let aVal = a, bVal = b;
-  mySupportTags.forEach(tag=>{ if(tag.type==='redirectOtherAttackValue'){ bVal = tag.map[b]; } });
-  oppSupportTags.forEach(tag=>{ if(tag.type==='redirectOtherAttackValue'){ aVal = tag.map[a]; } });
+  // Attack-redirect effects (e.g. Disrupt Ray): confirmed by live play to
+  // genuinely change which attack the affected side is considered to have
+  // used, same as any other "attack becomes X" override -- NOT a value-only
+  // swap. (Evidence: opponent's O-to-0 Cross ability correctly triggered
+  // against a player who had pressed X but was redirected to O by Disrupt
+  // Ray -- that only happens if the actual attack changed, not just the
+  // damage number.)
+  mySupportTags.forEach(tag=>{ if(tag.type==='redirectOtherAttackValue'){ b = tag.map[b]; } });
+  oppSupportTags.forEach(tag=>{ if(tag.type==='redirectOtherAttackValue'){ a = tag.map[a]; } });
 
   // Counter Attack: "If Opponent uses [X] Attack, it will miss. Then you
   // counter with opponent's [X] attack power." Only live when its owner
@@ -287,20 +290,20 @@ function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSuppo
 
   let myDmg, oppDmg;
   if(myGoesFirst===true){
-    myDmg = applyBoosts(myCountering ? baseVal(oppCard, b) : (myCrashing ? myHp : effectiveDamage(myCard, a, oppCard, aVal)), true);
+    myDmg = applyBoosts(myCountering ? baseVal(oppCard, b) : (myCrashing ? myHp : effectiveDamage(myCard, a, oppCard)), true);
     const oppHpAfterMyHit = oppCrashing ? Math.max(0, oppHp - myDmg) : oppHp;
     oppDmg = (oppCrashing && oppHpAfterMyHit<=0) ? 0 :
-      applyBoosts(oppCountering ? baseVal(myCard, a) : (oppCrashing ? oppHpAfterMyHit : effectiveDamage(oppCard, b, myCard, bVal)), false);
+      applyBoosts(oppCountering ? baseVal(myCard, a) : (oppCrashing ? oppHpAfterMyHit : effectiveDamage(oppCard, b, myCard)), false);
   } else if(myGoesFirst===false){
-    oppDmg = applyBoosts(oppCountering ? baseVal(myCard, a) : (oppCrashing ? oppHp : effectiveDamage(oppCard, b, myCard, bVal)), false);
+    oppDmg = applyBoosts(oppCountering ? baseVal(myCard, a) : (oppCrashing ? oppHp : effectiveDamage(oppCard, b, myCard)), false);
     const myHpAfterOppHit = myCrashing ? Math.max(0, myHp - oppDmg) : myHp;
     myDmg = (myCrashing && myHpAfterOppHit<=0) ? 0 :
-      applyBoosts(myCountering ? baseVal(oppCard, b) : (myCrashing ? myHpAfterOppHit : effectiveDamage(myCard, a, oppCard, aVal)), true);
+      applyBoosts(myCountering ? baseVal(oppCard, b) : (myCrashing ? myHpAfterOppHit : effectiveDamage(myCard, a, oppCard)), true);
   } else {
     // Simultaneous, no established order -- each side's Crash power (if any)
     // uses their own pre-bout HP, since neither has attacked yet.
-    myDmg = applyBoosts(myCountering ? baseVal(oppCard, b) : (myCrashing ? myHp : effectiveDamage(myCard, a, oppCard, aVal)), true);
-    oppDmg = applyBoosts(oppCountering ? baseVal(myCard, a) : (oppCrashing ? oppHp : effectiveDamage(oppCard, b, myCard, bVal)), false);
+    myDmg = applyBoosts(myCountering ? baseVal(oppCard, b) : (myCrashing ? myHp : effectiveDamage(myCard, a, oppCard)), true);
+    oppDmg = applyBoosts(oppCountering ? baseVal(myCard, a) : (oppCrashing ? oppHp : effectiveDamage(oppCard, b, myCard)), false);
   }
 
   mySupportTags.forEach(tag=>{ if(tag.type==='zeroOppAttack' && (!tag.attack || tag.attack===b)) oppDmg = 0; });
@@ -1151,7 +1154,7 @@ function renderAttackPhase(el){
     const oppTags = B.oppSupportRevealed ? parseEffectTags(effectText(B.oppSupportRevealed), B.oppSupportRevealed) : [];
     const ranked = rankSupportOptions(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, B.myHand, oppTags, 0, iAmTurnPlayer);
     const redirectTag = oppTags.find(t=>t.type==='redirectOtherAttackValue');
-    const redirectWarning = redirectTag ? `<div class="warn-box">${B.oppSupportRevealed.name} redirects your locked ${B.myLockedAtk.toUpperCase()} to use <b>${redirectTag.map[B.myLockedAtk].toUpperCase()}'s damage number</b> instead. Any support you pick that boosts/doubles "${B.myLockedAtk.toUpperCase()}" still applies — it checks which button you pressed, not which number came out — so it's scored against the redirected value below, not wasted.</div>` : '';
+    const redirectWarning = redirectTag ? `<div class="warn-box">${B.oppSupportRevealed.name} changes your locked ${B.myLockedAtk.toUpperCase()} into <b>${redirectTag.map[B.myLockedAtk].toUpperCase()}</b> for real — it's treated as if you'd pressed ${redirectTag.map[B.myLockedAtk].toUpperCase()} the whole time. Support you pick that boosts "${B.myLockedAtk.toUpperCase()}" specifically will no longer apply; the opponent's Cross ability (if tied to ${redirectTag.map[B.myLockedAtk].toUpperCase()}) can now trigger instead. Scored against the redirected attack below.</div>` : '';
     const randomEv = getSelectedDeck() ? randomCardExpectedValue(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppTags, 0, iAmTurnPlayer) : null;
     const combined = ranked.map(r=>({id:r.id, name:r.name, val:r.worst, note:null}));
     if(randomEv){
@@ -1504,13 +1507,13 @@ const App = {
     const oppSupportTags = (B.oppSupportRevealed && !oppWasRandom) ? parseEffectTags(effectText(B.oppSupportRevealed), B.oppSupportRevealed) : (oppRandomReveal ? parseEffectTags(effectText(oppRandomReveal), oppRandomReveal) : []);
 
     // Labels the button actually pressed alongside any redirect that changed
-    // which NUMBER got used -- e.g. "O (redirected to T's value)" -- so the
-    // log never silently shows "O" when the real damage came from elsewhere.
+    // it to a genuinely different attack -- e.g. "X (changed to O)" -- so the
+    // log never silently shows "X" when the real attack used was different.
     function attackLabel(chosenAtk, isMine){
       const relevantTags = isMine ? oppSupportTags : mySupportTags; // redirects always come from the OTHER side's card
       const redirect = relevantTags.find(t=>t.type==='redirectOtherAttackValue');
       if(redirect && redirect.map[chosenAtk]){
-        return chosenAtk.toUpperCase()+' (redirected to '+redirect.map[chosenAtk].toUpperCase()+"'s value)";
+        return chosenAtk.toUpperCase()+' (changed to '+redirect.map[chosenAtk].toUpperCase()+')';
       }
       return chosenAtk.toUpperCase();
     }
