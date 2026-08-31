@@ -190,14 +190,60 @@ function parseEffectTags(text, card){
     if(locked) tags.push({type:'lockOwnAttack', attack:locked});
   }
   if(/Opponent'?s attack changes/i.test(text)){
-    // Confirmed by play: this swaps only which damage NUMBER is used, not which
-    // button was pressed -- own X/T/O-triggered abilities still key off the
-    // original chosen attack, not the redirected one. (Disrupt Ray: O->T, T->X, X->O)
+    // Confirmed by live play: this genuinely changes which attack the
+    // affected side is considered to have used (a real override, same as
+    // "Own attack becomes X"), not just which damage number gets used.
+    // (Disrupt Ray: O->T, T->X, X->O)
     tags.push({type:'redirectOtherAttackValue', map:{o:'t', t:'x', x:'o'}});
   }
-  if(m = /Draw\s*(\d*)\s*cards?/i.exec(text)){
-    tags.push({type:'drawCards', amount: m[1] ? parseInt(m[1]) : 1});
+  if(m = /Draw\s*(\d*|a|one)\s*cards?/i.exec(text)){
+    const w = (m[1]||'').toLowerCase();
+    tags.push({type:'drawCards', amount: (w==='a'||w==='one'||w==='') ? 1 : parseInt(w)});
   }
+
+  // --- DP slot effects --------------------------------------------------
+  // "DP slot" is a pile of the specific cards sacrificed for DP, not just a
+  // number -- discard effects remove actual cards (most-recently-sacrificed
+  // first), so these tags carry counts/flags for resolveTurn to act on
+  // against the real B.myDpPile/B.oppDpPile arrays, plus (for the scaling
+  // and conditional variants) feed into computeCell via dp counts.
+  if(/Discard all(?: own)?(?: DP)? cards? in(?: own)? DP slot/i.test(text)){
+    tags.push({type:'discardOwnDpAll'});
+  } else if(m = /Discard\s*(\d+)\s*(?:DP )?cards?\s+(?:from|in)\s*own DP slot/i.exec(text)){
+    tags.push({type:'discardOwnDpCount', count: parseInt(m[1])});
+  }
+  if(/[Dd]iscard all of (?:foe|opponent)'?s cards? in(?: his| their)? DP slot/i.test(text)){
+    tags.push({type:'discardOppDpCount', count:'all'});
+  } else if(m = /Discard\s*(\d+)\s*of opponent'?s cards? in(?: his| their)? DP slot/i.exec(text)){
+    tags.push({type:'discardOppDpCount', count: parseInt(m[1])});
+  } else if(m = /Discard opponent'?s\s*(\d*)\s*top DP cards?(?: shown)? in(?: his| their)? DP slot/i.exec(text)){
+    tags.push({type:'discardOppDpCount', count: m[1] ? parseInt(m[1]) : 1});
+  }
+  if(/Foe discards? same number of DP cards?/i.test(text)){
+    tags.push({type:'discardOppDpCount', count:'matchOwnDiscard'});
+  }
+  if(/Opponent discards? his hand and all cards? in his DP slot/i.test(text)){
+    tags.push({type:'discardOppHand'});
+    tags.push({type:'discardOppDpCount', count:'all'});
+  }
+  if(m = /Add(?:ed)? number of DP cards? in(?: own)? DP [Ss]lot x(\d+) to own (?:attack power|Attack power)/i.exec(text)){
+    tags.push({type:'dpCountBoostAttack', per: parseInt(m[1])});
+  }
+  if(m = /Add(?:ed)? number of DP cards? in(?: own)? DP slot x(\d+) to own HP/i.exec(text)){
+    tags.push({type:'dpCountBoostHp', per: parseInt(m[1])});
+  }
+  if(/Discard (?:cards? in|own) DP slot.*multiply(?:ing)? (?:own )?attack power by number of discards?/i.test(text)){
+    tags.push({type:'discardOwnDpAll'});
+    tags.push({type:'multiplyAttackByOwnDiscardCount'});
+  }
+  if(/Recover HP,?\s*number of discards? x\s*100/i.test(text)){
+    tags.push({type:'healSelfPerOwnDiscard', per:100});
+  }
+  if(m = /If opponent has more than\s*(\d+)\s*cards? in DP slot,?\s*his attack power is 0/i.exec(text)){
+    tags.push({type:'zeroOppAttackIfDpCountOver', threshold: parseInt(m[1])});
+  }
+  // --- end DP slot effects -----------------------------------------------
+
   // Common "if both attacks are the same/different" conditional prefix --
   // applies to whatever effect(s) the rest of the sentence produced above.
   let condition = null;
@@ -208,8 +254,48 @@ function parseEffectTags(text, card){
   return tags;
 }
 
-function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSupportTags, hiddenBuffer, iAmTurnPlayer){
+// --- DP pile helpers -------------------------------------------------
+// The DP slot is a pile of the specific Digimon cards sacrificed for DP, in
+// sacrifice order (index 0 = first/oldest, last index = most recently
+// sacrificed / "top" of the pile). Total DP is always derived from the pile
+// so it can never drift out of sync with what's actually in it.
+function dpPileTotal(pile){ return (pile||[]).reduce((s,c)=>s+(c.pp||0), 0); }
+function dpPileCount(pile){ return (pile||[]).length; }
+function dpPileDiscardTop(pile, count){
+  // Removes up to `count` cards from the top (most recent end) of the pile,
+  // returns the discarded cards (for logging / moving to the Offline Deck).
+  const n = Math.min(count, pile.length);
+  return pile.splice(pile.length - n, n);
+}
+// Applies discard-DP-slot tags from one side's support text: own-side
+// discards first (so a "foe discards the same number" tag on the same card
+// knows how many that was), then any effect targeting the opponent's pile.
+// Returns how many of the OWN pile's cards were discarded, for chaining.
+function applyDpSlotEffects(tags, ownPile, oppPile, ownLabel, oppLabel){
+  let ownDiscardedCount = 0;
+  tags.forEach(tag=>{
+    if(tag.type==='discardOwnDpAll' || tag.type==='discardOwnDpCount'){
+      const n = tag.type==='discardOwnDpAll' ? ownPile.length : tag.count;
+      const removed = dpPileDiscardTop(ownPile, n);
+      ownDiscardedCount += removed.length;
+      if(removed.length) logEvent(`${ownLabel} discarded ${removed.length} DP card(s) (${removed.map(c=>c.name).join(', ')}) from the DP slot.`);
+    }
+  });
+  tags.forEach(tag=>{
+    if(tag.type==='discardOppDpCount'){
+      let n = tag.count;
+      if(n==='all') n = oppPile.length;
+      else if(n==='matchOwnDiscard') n = ownDiscardedCount;
+      const removed = dpPileDiscardTop(oppPile, n);
+      if(removed.length) logEvent(`${oppLabel} had ${removed.length} DP card(s) (${removed.map(c=>c.name).join(', ')}) discarded from their DP slot.`);
+    }
+  });
+  return ownDiscardedCount;
+}
+
+function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSupportTags, hiddenBuffer, iAmTurnPlayer, myDpCount, oppDpCount){
   mySupportTags = mySupportTags||[]; oppSupportTags = oppSupportTags||[]; hiddenBuffer = hiddenBuffer||0;
+  myDpCount = myDpCount||0; oppDpCount = oppDpCount||0;
   const origA = a, origB = b;
   function conditionMet(tag){
     if(!tag.condition) return true;
@@ -279,11 +365,14 @@ function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSuppo
     let dmg = base;
     const tags = isMine ? mySupportTags : oppSupportTags;
     const atk = isMine ? a : b;
+    const ownDpCount = isMine ? myDpCount : oppDpCount;
     tags.forEach(tag=>{
       if(tag.type==='boostOwnAttack') dmg += tag.amount;
       if(tag.type==='boostOwnAttackSpecific' && tag.attack===atk) dmg += tag.amount;
       if(tag.type==='doubleOwnAttack' && tag.attack===atk) dmg *= 2;
       if(tag.type==='multiplyOwnAttack') dmg *= tag.mult;
+      if(tag.type==='dpCountBoostAttack') dmg += tag.per * ownDpCount;
+      if(tag.type==='multiplyAttackByOwnDiscardCount') dmg *= Math.max(1, ownDpCount);
     });
     return Math.max(0, dmg);
   }
@@ -308,6 +397,8 @@ function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSuppo
 
   mySupportTags.forEach(tag=>{ if(tag.type==='zeroOppAttack' && (!tag.attack || tag.attack===b)) oppDmg = 0; });
   oppSupportTags.forEach(tag=>{ if(tag.type==='zeroOppAttack' && (!tag.attack || tag.attack===a)) myDmg = 0; });
+  mySupportTags.forEach(tag=>{ if(tag.type==='zeroOppAttackIfDpCountOver' && oppDpCount>tag.threshold) oppDmg = 0; });
+  oppSupportTags.forEach(tag=>{ if(tag.type==='zeroOppAttackIfDpCountOver' && myDpCount>tag.threshold) myDmg = 0; });
 
   if(myCountering) oppDmg = 0; // their matching attack "misses"
   if(oppCountering) myDmg = 0;
@@ -335,12 +426,16 @@ function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSuppo
     if(tag.type==='healOpp') oppHealAmt += tag.amount;
     if(tag.type==='halveSelfHp') myHalve = true;
     if(tag.type==='halveOppHp') oppHalve = true;
+    if(tag.type==='dpCountBoostHp') myHealAmt += tag.per * myDpCount;
+    if(tag.type==='healSelfPerOwnDiscard') myHealAmt += tag.per * myDpCount;
   });
   oppSupportTags.forEach(tag=>{
     if(tag.type==='healSelf') oppHealAmt += tag.amount;
     if(tag.type==='healOpp') myHealAmt += tag.amount;
     if(tag.type==='halveSelfHp') oppHalve = true;
     if(tag.type==='halveOppHp') myHalve = true;
+    if(tag.type==='dpCountBoostHp') oppHealAmt += tag.per * oppDpCount;
+    if(tag.type==='healSelfPerOwnDiscard') oppHealAmt += tag.per * oppDpCount;
   });
   if(a==='x' && isEatUpHpXTag(myCard.xt)) myHealAmt += myDmg;
   if(b==='x' && isEatUpHpXTag(oppCard.xt)) oppHealAmt += oppDmg;
@@ -350,11 +445,11 @@ function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSuppo
   return { myDmg, oppDmg, koOpp: myDmg>=oppHp, koMe: oppDmg>=myHp, myHealAmt, oppHealAmt, myHalve, oppHalve, mySetHp, oppSetHp };
 }
 
-function computeMatrix(myCard, oppCard, myHp, oppHp, mySupportTags, hiddenBuffer, iAmTurnPlayer){
+function computeMatrix(myCard, oppCard, myHp, oppHp, mySupportTags, hiddenBuffer, iAmTurnPlayer, myDpCount, oppDpCount){
   const atks=['o','t','x'];
   const grid = {};
   atks.forEach(a=>{ grid[a]={}; atks.forEach(b=>{
-    grid[a][b] = computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, [], hiddenBuffer, iAmTurnPlayer);
+    grid[a][b] = computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, [], hiddenBuffer, iAmTurnPlayer, myDpCount, oppDpCount);
   }); });
   return grid;
 }
@@ -369,7 +464,7 @@ function maximin(grid){
   return {best, bestVal};
 }
 
-function rankSupportOptions(myCard, oppCard, myHp, oppHp, fixedA, hand, oppSupportTagsKnown, hiddenBuffer, iAmTurnPlayer){
+function rankSupportOptions(myCard, oppCard, myHp, oppHp, fixedA, hand, oppSupportTagsKnown, hiddenBuffer, iAmTurnPlayer, myDpCount, oppDpCount){
   const candidates = [{id:'', name:'— none —', tags:[]}].concat(
     hand.map(c=>({id:String(c._uid||c.id), name:c.name + (c.type==='option'?' (option)':''), tags:parseEffectTags(effectText(c), c)}))
   );
@@ -450,7 +545,7 @@ function rankEntranceCandidates(hand, oppActive, oppHp){
   });
 }
 
-function rankSupportOptionsOpenInfo(myCard, oppCard, myHp, oppHp, fixedA, myHand, oppHandCards, iAmTurnPlayer){
+function rankSupportOptionsOpenInfo(myCard, oppCard, myHp, oppHp, fixedA, myHand, oppHandCards, iAmTurnPlayer, myDpCount, oppDpCount){
   const myCandidates = [{id:'', name:'— none —', tags:[]}].concat(
     myHand.map(c=>({id:String(c._uid||c.id), name:c.name + (c.type==='option'?' (option)':''), tags:parseEffectTags(effectText(c), c)}))
   );
@@ -461,7 +556,7 @@ function rankSupportOptionsOpenInfo(myCard, oppCard, myHp, oppHp, fixedA, myHand
     let worst = Infinity;
     ['o','t','x'].forEach(b=>{
       oppSupportCandidates.forEach(oppTags=>{
-        const cell = computeCell(myCard, oppCard, myHp, oppHp, fixedA, b, cand.tags, oppTags, 0, iAmTurnPlayer);
+        const cell = computeCell(myCard, oppCard, myHp, oppHp, fixedA, b, cand.tags, oppTags, 0, iAmTurnPlayer, myDpCount, oppDpCount);
         const net = cell.myDmg - cell.oppDmg;
         if(net<worst) worst = net;
       });
@@ -476,7 +571,7 @@ function rankSupportOptionsOpenInfo(myCard, oppCard, myHp, oppHp, fixedA, myHand
 // the right lens; the opponent's response is still treated adversarially).
 // oppSupportSets: either a single known tag array, or an array of possible
 // tag arrays (e.g. from their tracked hand) to treat as opponent options too.
-function randomCardExpectedValue(myCard, oppCard, myHp, oppHp, fixedA, oppSupportSets, hiddenBuffer, iAmTurnPlayer){
+function randomCardExpectedValue(myCard, oppCard, myHp, oppHp, fixedA, oppSupportSets, hiddenBuffer, iAmTurnPlayer, myDpCount, oppDpCount){
   const remaining = getRemainingDeckList();
   if(!remaining.length) return null;
   const sets = (oppSupportSets.length && Array.isArray(oppSupportSets[0])) ? oppSupportSets : [oppSupportSets||[]];
@@ -487,7 +582,7 @@ function randomCardExpectedValue(myCard, oppCard, myHp, oppHp, fixedA, oppSuppor
     let worst = Infinity;
     ['o','t','x'].forEach(b=>{
       sets.forEach(oppTags=>{
-        const cell = computeCell(myCard, oppCard, myHp, oppHp, fixedA, b, tags, oppTags, hiddenBuffer||0, iAmTurnPlayer);
+        const cell = computeCell(myCard, oppCard, myHp, oppHp, fixedA, b, tags, oppTags, hiddenBuffer||0, iAmTurnPlayer, myDpCount, oppDpCount);
         const net = cell.myDmg - cell.oppDmg;
         if(net<worst) worst = net;
       });
@@ -600,7 +695,7 @@ const B = {
   turnPlayer:'me',
   myActive:null, oppActive:null,
   myHp:0, oppHp:0,
-  myDpTotal:0, oppDpTotal:0,
+  myDpTotal:0, oppDpTotal:0, myDpPile:[], oppDpPile:[],
   myHand:[],
   oppHand:[],
   phase:'deckselect',
@@ -619,7 +714,7 @@ function newDuel(){
   Object.assign(B, {
     myScore:0, oppScore:0, round:1, turnPlayer:'me',
     myActive:null, oppActive:null, myHp:0, oppHp:0,
-    myDpTotal:0, oppDpTotal:0, myHand:[], oppHand:[], phase:'deckselect',
+    myDpTotal:0, oppDpTotal:0, myDpPile:[], oppDpPile:[], myHand:[], oppHand:[], phase:'deckselect',
     atkStep:'pick', myLockedAtk:null, mySupportChoiceId:'', oppSupportRevealed:null,
     selectedDeckId:null, deckUsedThisMatch:{},
     log:[]
@@ -1100,7 +1195,7 @@ function renderAttackPhase(el){
   const iAmTurnPlayer = B.turnPlayer==='me';
 
   if(B.atkStep==='pick'){
-    const grid = computeMatrix(B.myActive, B.oppActive, B.myHp, B.oppHp, [], 0, iAmTurnPlayer);
+    const grid = computeMatrix(B.myActive, B.oppActive, B.myHp, B.oppHp, [], 0, iAmTurnPlayer, B.myDpPile.length, B.oppDpPile.length);
     const rec = maximin(grid);
     const labels = {o:'Circle',t:'Triangle',x:'Cross'};
     let matrixHtml = '<table class="matrix"><tr><th>You \u2193 / Foe \u2192</th><th>Circle</th><th>Triangle</th><th>Cross</th></tr>';
@@ -1152,10 +1247,10 @@ function renderAttackPhase(el){
 
   if(B.atkStep==='myReactiveSupport'){
     const oppTags = B.oppSupportRevealed ? parseEffectTags(effectText(B.oppSupportRevealed), B.oppSupportRevealed) : [];
-    const ranked = rankSupportOptions(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, B.myHand, oppTags, 0, iAmTurnPlayer);
+    const ranked = rankSupportOptions(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, B.myHand, oppTags, 0, iAmTurnPlayer, B.myDpPile.length, B.oppDpPile.length);
     const redirectTag = oppTags.find(t=>t.type==='redirectOtherAttackValue');
     const redirectWarning = redirectTag ? `<div class="warn-box">${B.oppSupportRevealed.name} changes your locked ${B.myLockedAtk.toUpperCase()} into <b>${redirectTag.map[B.myLockedAtk].toUpperCase()}</b> for real — it's treated as if you'd pressed ${redirectTag.map[B.myLockedAtk].toUpperCase()} the whole time. Support you pick that boosts "${B.myLockedAtk.toUpperCase()}" specifically will no longer apply; the opponent's Cross ability (if tied to ${redirectTag.map[B.myLockedAtk].toUpperCase()}) can now trigger instead. Scored against the redirected attack below.</div>` : '';
-    const randomEv = getSelectedDeck() ? randomCardExpectedValue(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppTags, 0, iAmTurnPlayer) : null;
+    const randomEv = getSelectedDeck() ? randomCardExpectedValue(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppTags, 0, iAmTurnPlayer, B.myDpPile.length, B.oppDpPile.length) : null;
     const combined = ranked.map(r=>({id:r.id, name:r.name, val:r.worst, note:null}));
     if(randomEv){
       combined.push({id:'__random__', name:'Play a random card from my deck', val:randomEv.ev, note:`Expected value across the ${randomEv.poolSize} cards still unaccounted for in your tracked deck.`, approx:true});
@@ -1178,9 +1273,9 @@ function renderAttackPhase(el){
   }
 
   if(B.atkStep==='myBlindSupport'){
-    const ranked = rankSupportOptionsOpenInfo(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, B.myHand, B.oppHand, iAmTurnPlayer);
+    const ranked = rankSupportOptionsOpenInfo(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, B.myHand, B.oppHand, iAmTurnPlayer, B.myDpPile.length, B.oppDpPile.length);
     const oppPossibleSets = [[]].concat(B.oppHand.map(c=>parseEffectTags(effectText(c), c)));
-    const randomEv = getSelectedDeck() ? randomCardExpectedValue(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppPossibleSets, 0, iAmTurnPlayer) : null;
+    const randomEv = getSelectedDeck() ? randomCardExpectedValue(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppPossibleSets, 0, iAmTurnPlayer, B.myDpPile.length, B.oppDpPile.length) : null;
     const combined = ranked.map(r=>({id:r.id, name:r.name, val:r.worst, note:null}));
     if(randomEv){
       combined.push({id:'__random__', name:'Play a random card from my deck', val:randomEv.ev, note:`Expected value across the ${randomEv.poolSize} cards still unaccounted for in your tracked deck.`, approx:true});
@@ -1351,7 +1446,8 @@ const App = {
     if(!id){ logEvent('You chose not to sacrifice this turn.'); B.dpStep = 'digivolve'; renderDpPhase(document.getElementById('phasePanel')); return; }
     const card = findInHand(B.myHand, id);
     if(!card) return;
-    B.myDpTotal += (card.pp||0);
+    B.myDpPile.push(card);
+    B.myDpTotal = dpPileTotal(B.myDpPile);
     removeFromHand(card._uid||card.id);
     logEvent(`You sacrificed ${card.name} for +${card.pp||0} DP (total ${B.myDpTotal}).`);
     B.dpStep = 'digivolve';
@@ -1374,7 +1470,8 @@ const App = {
     if(selectId){
       const card = findInHand(B.oppHand, selectId);
       if(card){
-        B.oppDpTotal += (card.pp||0);
+        B.oppDpPile.push(card);
+        B.oppDpTotal = dpPileTotal(B.oppDpPile);
         removeFromOppHand(card._uid||card.id);
         logEvent(`Opponent sacrificed ${card.name} for +${card.pp||0} DP (total ${B.oppDpTotal}).`);
       }
@@ -1385,9 +1482,11 @@ const App = {
     const amountVal = parseInt(document.getElementById('oppSacAmount').value);
     let gain = amountVal || 0;
     let label = nameVal || 'a card';
-    if(nameVal){ const oc = findCardByName(nameVal); if(oc) gain = oc.pp||0; removeFromOppHand(oc ? oc.id : ''); }
+    let pseudoCard = null;
+    if(nameVal){ const oc = findCardByName(nameVal); if(oc){ gain = oc.pp||0; pseudoCard = oc; } removeFromOppHand(oc ? oc.id : ''); }
     if(gain>0 || nameVal){
-      B.oppDpTotal += gain;
+      B.oppDpPile.push(pseudoCard || {name:label, pp:gain});
+      B.oppDpTotal = dpPileTotal(B.oppDpPile);
       logEvent(`Opponent sacrificed ${label} for +${gain} DP (total ${B.oppDpTotal}).`);
     }
     renderDpPhase(document.getElementById('phasePanel')); renderStatePanel(); renderHeader();
@@ -1400,6 +1499,7 @@ const App = {
     B.oppActive = Object.assign({}, card);
     B.oppHp = card.hp;
     B.oppDpTotal = 0;
+    B.oppDpPile = [];
     logEvent(`Opponent digivolved to ${card.name} (DP counter spent, reset to 0).`);
     renderAll();
   },
@@ -1411,6 +1511,7 @@ const App = {
     B.myActive = Object.assign({}, card);
     B.myHp = card.hp;
     B.myDpTotal = 0;
+    B.myDpPile = [];
     logEvent(`You digivolved to ${card.name} (DP counter spent, reset to 0).`);
     renderAll();
   },
@@ -1520,7 +1621,7 @@ const App = {
 
     let unknownNote = '';
     if(oppAtk==='__unknown__'){
-      const options = ['o','t','x'].map(b=>computeCell(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, b, mySupportTags, oppSupportTags, 0, iAmTurnPlayer));
+      const options = ['o','t','x'].map(b=>computeCell(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, b, mySupportTags, oppSupportTags, 0, iAmTurnPlayer, B.myDpPile.length, B.oppDpPile.length));
       const allSame = options.every(c=>c.myDmg===options[0].myDmg && c.oppDmg===options[0].oppDmg);
       if(allSame){
         oppAtk = 'o'; // doesn't matter which -- outcome is identical either way, confirmed below
@@ -1534,7 +1635,7 @@ const App = {
       }
     }
 
-    const cell = computeCell(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppAtk, mySupportTags, oppSupportTags, 0, iAmTurnPlayer);
+    const cell = computeCell(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppAtk, mySupportTags, oppSupportTags, 0, iAmTurnPlayer, B.myDpPile.length, B.oppDpPile.length);
     B.oppHp = Math.max(0, B.oppHp - cell.myDmg);
     B.myHp = Math.max(0, B.myHp - cell.oppDmg);
     // HP-modifying effects (heals are typically confirmed permanent; applied after the damage exchange).
@@ -1546,6 +1647,22 @@ const App = {
     if(cell.mySetHp!=null) B.myHp = cell.mySetHp;
     if(cell.oppSetHp!=null) B.oppHp = cell.oppSetHp;
     if(mySupportCard) removeFromHand(mySupportCard._uid||mySupportCard.id);
+
+    // DP slot discard effects -- resolved using the pre-discard counts that
+    // already fed into cell's damage/heal math above, so this can't retroactively
+    // change what just happened this bout, only what's banked going forward.
+    applyDpSlotEffects(mySupportTags, B.myDpPile, B.oppDpPile, 'You', 'Opponent');
+    applyDpSlotEffects(oppSupportTags, B.oppDpPile, B.myDpPile, 'Opponent', 'You');
+    B.myDpTotal = dpPileTotal(B.myDpPile);
+    B.oppDpTotal = dpPileTotal(B.oppDpPile);
+    mySupportTags.forEach(tag=>{ if(tag.type==='discardOppHand' && B.oppHand.length){
+      logEvent(`Opponent discarded their entire hand (${B.oppHand.map(c=>c.name).join(', ')}).`);
+      B.oppHand = [];
+    }});
+    oppSupportTags.forEach(tag=>{ if(tag.type==='discardOppHand' && B.myHand.length){
+      logEvent(`You discarded your entire hand (${B.myHand.map(c=>c.name).join(', ')}).`);
+      B.myHand = [];
+    }});
 
     const mySupportLabel = mySupportCard ? ' + '+mySupportCard.name : (myRandomReveal ? ' + random card (revealed: '+myRandomReveal.name+')' : (B.mySupportChoiceId==='__random__' ? ' + random card (unknown effect)' : ''));
     const oppSupportLabel = B.oppSupportRevealed ? ' + '+(oppRandomReveal ? 'random card (revealed: '+oppRandomReveal.name+')' : B.oppSupportRevealed.name+(oppWasRandom?' (unknown effect)':'')) : '';
