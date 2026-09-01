@@ -244,11 +244,77 @@ function parseEffectTags(text, card){
   }
   // --- end DP slot effects -----------------------------------------------
 
-  // Common "if both attacks are the same/different" conditional prefix --
-  // applies to whatever effect(s) the rest of the sentence produced above.
+  // Conditional prefixes -- covers "if both attacks are same/different" plus
+  // the much larger family of specialty/level/HP/attack-choice/hand-count
+  // conditions found across the database. Each produces a condition OBJECT
+  // (not just a label) with whatever it needs to be evaluated later against
+  // real game state in computeCell's conditionMet(). Only one condition is
+  // detected per card (matches the existing single-clause design already
+  // used for attacksSame/attacksDiffer) -- applies to every tag parsed from
+  // this text, same simplification as before.
   let condition = null;
-  if(/If both (?:players'? )?attacks? (?:are|is) different/i.test(text)) condition = 'attacksDiffer';
-  else if(/If both (?:players'? )?(?:attacks?|use the same attack)/i.test(text) && /same/i.test(text)) condition = 'attacksSame';
+  const SP = 'Fire|Water|Nature|Darkness|Dark|Rare';
+  const normSp = s => s ? (s.toLowerCase()==='dark' ? 'darkness' : s.toLowerCase()) : s;
+  if(/If both (?:players'? )?attacks? (?:are|is) different/i.test(text)) condition = {type:'attacksDiffer'};
+  else if(/If both (?:players'? )?(?:attacks?|use the same attack)/i.test(text) && /same/i.test(text)) condition = {type:'attacksSame'};
+  else if(m = new RegExp(`If (?:foe'?s|opponent'?s) [Ss]pecialty is (?:not )?(${SP})(?: or (${SP}))?`, 'i').exec(text)){
+    const negate = /is not/i.test(m[0]);
+    const sps = [normSp(m[1]), normSp(m[2])].filter(Boolean);
+    condition = {type:'specialtyOpp', sp:sps, negate};
+  }
+  else if(m = new RegExp(`If opponent is (${SP})\\b`, 'i').exec(text)){
+    condition = {type:'specialtyOpp', sp:[normSp(m[1])]};
+  }
+  else if(new RegExp(`If own [Ss]pecialty is (${SP})`, 'i').test(text)){
+    const mm = new RegExp(`If own [Ss]pecialty is (${SP})`, 'i').exec(text);
+    condition = {type:'specialtyOwn', sp:[normSp(mm[1])]};
+  }
+  else if(/If both players'? specialt(?:y|ies) (?:are|is) the same/i.test(text)){
+    condition = {type:'specialtySame'};
+  }
+  else if(m = /If opponent'?s level is\s*([RCUA])\b/i.exec(text)){
+    condition = {type:'levelOpp', lvl:m[1].toUpperCase()};
+  }
+  else if(m = /If opponent is level\s*([RCUA])\b/i.exec(text)){
+    condition = {type:'levelOpp', lvl:m[1].toUpperCase()};
+  }
+  else if(m = /If own level is\s*([RCUA])\b/i.exec(text)){
+    condition = {type:'levelOwn', lvl:m[1].toUpperCase()};
+  }
+  else if(/If both levels are\s*([RCUA])\b/i.test(text)){
+    const mm = /If both levels are\s*([RCUA])\b/i.exec(text);
+    condition = {type:'bothLevels', lvl:mm[1].toUpperCase()};
+  }
+  else if(/If own level is lower/i.test(text) || /If own level is below opponent'?s/i.test(text)){
+    condition = {type:'levelRelative', cmp:'lower'};
+  }
+  else if(m = /If own HP (?:are|is) less than\s*(\d+)/i.exec(text)){
+    condition = {type:'hpOwn', cmp:'lt', value:parseInt(m[1])};
+  }
+  else if(/If own HP (?:are|is) more than opponent'?s HP/i.test(text)){
+    condition = {type:'hpRelative', cmp:'gt'}; // own > opp
+  }
+  else if(/If HP is less than opponent'?s/i.test(text) || /If own HP is less than foe'?s HP/i.test(text)){
+    condition = {type:'hpRelative', cmp:'lt'}; // own < opp
+  }
+  else if(m = /If opponent'?s HP (?:are|is) (?:more than\s*(\d+)|(\d+)\+)/i.exec(text)){
+    condition = {type:'hpOpp', cmp:'gte', value:parseInt(m[1]||m[2])};
+  }
+  else if(/If opponent'?s HP is less than own/i.test(text)){
+    condition = {type:'hpRelative', cmp:'gt'}; // own > opp (i.e. opp < own)
+  }
+  else if(m = /If own Attack is\s*(O|T|X|Circle|Triangle|Cross)\b/i.exec(text)){
+    condition = {type:'attackOwn', atk:wordToAtk(m[1]), negate:/is not/i.test(text)};
+  }
+  else if(m = /If opponent (?:used|uses)\s*(O|T|X|Circle|Triangle|Cross)\b/i.exec(text)){
+    condition = {type:'attackOpp', atk:wordToAtk(m[1])};
+  }
+  else if(m = /If own cards? in hand is\s*(\d+)\s*or more/i.exec(text)){
+    condition = {type:'handCountOwn', cmp:'gte', value:parseInt(m[1])};
+  }
+  else if(m = /If\s*(\d+)\s*or less cards? left in own hand/i.exec(text)){
+    condition = {type:'handCountOwn', cmp:'lte', value:parseInt(m[1])};
+  }
   if(condition) tags.forEach(t=>{ t.condition = condition; });
   tags.forEach(t=>{ t.fromOption = fromOption; });
   return tags;
@@ -293,18 +359,51 @@ function applyDpSlotEffects(tags, ownPile, oppPile, ownLabel, oppLabel){
   return ownDiscardedCount;
 }
 
-function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSupportTags, hiddenBuffer, iAmTurnPlayer, myDpCount, oppDpCount){
+function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSupportTags, hiddenBuffer, iAmTurnPlayer, myDpCount, oppDpCount, myHandCount, oppHandCount){
   mySupportTags = mySupportTags||[]; oppSupportTags = oppSupportTags||[]; hiddenBuffer = hiddenBuffer||0;
   myDpCount = myDpCount||0; oppDpCount = oppDpCount||0;
+  myHandCount = myHandCount||0; oppHandCount = oppHandCount||0;
   const origA = a, origB = b;
-  function conditionMet(tag){
+  // Evaluates a tag's condition from the perspective of whichever side
+  // played the card (isMine=true for mySupportTags, false for oppSupportTags)
+  // -- "own"/"opponent" in the card text always means relative to the player
+  // who chose to play it as support, not a fixed side.
+  function conditionMet(tag, isMine){
     if(!tag.condition) return true;
-    if(tag.condition==='attacksDiffer') return origA !== origB;
-    if(tag.condition==='attacksSame') return origA === origB;
-    return true;
+    const c = tag.condition;
+    const ownCard = isMine ? myCard : oppCard, foeCard = isMine ? oppCard : myCard;
+    const ownHp = isMine ? myHp : oppHp, foeHp = isMine ? oppHp : myHp;
+    const ownAtk = isMine ? origA : origB, foeAtk = isMine ? origB : origA;
+    const ownHandCount = isMine ? myHandCount : oppHandCount;
+    switch(c.type){
+      case 'attacksDiffer': return origA !== origB;
+      case 'attacksSame': return origA === origB;
+      case 'specialtyOpp': { const m = c.sp.includes((foeCard.sp||'').toLowerCase()); return c.negate ? !m : m; }
+      case 'specialtyOwn': return c.sp.includes((ownCard.sp||'').toLowerCase());
+      case 'specialtySame': return (ownCard.sp||'').toLowerCase() === (foeCard.sp||'').toLowerCase();
+      case 'levelOpp': return (foeCard.lvl||'').toUpperCase() === c.lvl;
+      case 'levelOwn': return (ownCard.lvl||'').toUpperCase() === c.lvl;
+      case 'bothLevels': return (ownCard.lvl||'').toUpperCase()===c.lvl && (foeCard.lvl||'').toUpperCase()===c.lvl;
+      case 'levelRelative': {
+        // Level ordering uncertain for where Armor (A) sits relative to R/C/U
+        // for "lower/higher" comparisons -- treated as equal-to-Rookie tier
+        // pending confirmation. Flag if this ever matters in a real report.
+        const order = {R:0, A:0, C:1, U:2};
+        const ov = order[(ownCard.lvl||'R').toUpperCase()] ?? 0;
+        const fv = order[(foeCard.lvl||'R').toUpperCase()] ?? 0;
+        return c.cmp==='lower' ? ov<fv : ov>fv;
+      }
+      case 'hpOwn': return c.cmp==='lt' ? ownHp<c.value : ownHp>=c.value;
+      case 'hpOpp': return c.cmp==='lt' ? foeHp<c.value : foeHp>=c.value;
+      case 'hpRelative': return c.cmp==='gt' ? ownHp>foeHp : ownHp<foeHp;
+      case 'attackOwn': { const m = ownAtk===c.atk; return c.negate ? !m : m; }
+      case 'attackOpp': return foeAtk===c.atk;
+      case 'handCountOwn': return c.cmp==='gte' ? ownHandCount>=c.value : ownHandCount<=c.value;
+      default: return true;
+    }
   }
-  mySupportTags = mySupportTags.filter(conditionMet);
-  oppSupportTags = oppSupportTags.filter(conditionMet);
+  mySupportTags = mySupportTags.filter(t=>conditionMet(t, true));
+  oppSupportTags = oppSupportTags.filter(t=>conditionMet(t, false));
 
   // Jamming: "Opponent's Support Effect is Voided. Can't Void Option Effect."
   // Only triggers when its owner presses Cross, like every other xt ability.
@@ -445,11 +544,11 @@ function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSuppo
   return { myDmg, oppDmg, koOpp: myDmg>=oppHp, koMe: oppDmg>=myHp, myHealAmt, oppHealAmt, myHalve, oppHalve, mySetHp, oppSetHp };
 }
 
-function computeMatrix(myCard, oppCard, myHp, oppHp, mySupportTags, hiddenBuffer, iAmTurnPlayer, myDpCount, oppDpCount){
+function computeMatrix(myCard, oppCard, myHp, oppHp, mySupportTags, hiddenBuffer, iAmTurnPlayer, myDpCount, oppDpCount, myHandCount, oppHandCount){
   const atks=['o','t','x'];
   const grid = {};
   atks.forEach(a=>{ grid[a]={}; atks.forEach(b=>{
-    grid[a][b] = computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, [], hiddenBuffer, iAmTurnPlayer, myDpCount, oppDpCount);
+    grid[a][b] = computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, [], hiddenBuffer, iAmTurnPlayer, myDpCount, oppDpCount, myHandCount, oppHandCount);
   }); });
   return grid;
 }
@@ -827,8 +926,12 @@ function renderStatePanel(){
   const remainingTotal = remainingList.reduce((s,r)=>s+r.count,0);
   el.innerHTML = `
     <div class="row">
-      <div class="col"><label>YOUR ACTIVE</label>${cardMiniPreview(B.myActive, B.myHp)}</div>
-      <div class="col"><label>OPPONENT'S ACTIVE</label>${cardMiniPreview(B.oppActive, B.oppHp)}</div>
+      <div class="col"><label>YOUR ACTIVE</label>${cardMiniPreview(B.myActive, B.myHp)}
+        ${B.myActive ? `<div class="small-note" style="margin-top:4px">Correct HP if it's ever wrong: <input type="number" id="myHpOverride" value="${B.myHp}" style="width:70px;display:inline-block"> <button class="btn small secondary" onclick="App.applyHpOverride('me')">SET</button></div>` : ''}
+      </div>
+      <div class="col"><label>OPPONENT'S ACTIVE</label>${cardMiniPreview(B.oppActive, B.oppHp)}
+        ${B.oppActive ? `<div class="small-note" style="margin-top:4px">Correct HP if it's ever wrong: <input type="number" id="oppHpOverride" value="${B.oppHp}" style="width:70px;display:inline-block"> <button class="btn small secondary" onclick="App.applyHpOverride('opp')">SET</button></div>` : ''}
+      </div>
     </div>
     <div class="row">
       <div class="col">
@@ -1195,7 +1298,7 @@ function renderAttackPhase(el){
   const iAmTurnPlayer = B.turnPlayer==='me';
 
   if(B.atkStep==='pick'){
-    const grid = computeMatrix(B.myActive, B.oppActive, B.myHp, B.oppHp, [], 0, iAmTurnPlayer, B.myDpPile.length, B.oppDpPile.length);
+    const grid = computeMatrix(B.myActive, B.oppActive, B.myHp, B.oppHp, [], 0, iAmTurnPlayer, B.myDpPile.length, B.oppDpPile.length, B.myHand.length, B.oppHand.length);
     const rec = maximin(grid);
     const labels = {o:'Circle',t:'Triangle',x:'Cross'};
     let matrixHtml = '<table class="matrix"><tr><th>You \u2193 / Foe \u2192</th><th>Circle</th><th>Triangle</th><th>Cross</th></tr>';
@@ -1386,7 +1489,10 @@ function renderAttackPhase(el){
 
 function renderLog(){
   const el = document.getElementById('logList');
-  el.innerHTML = B.log.map(e=>`<div class="log-entry"><span class="tag">R${e.round}</span>${e.text}</div>`).join('') || '<div class="small-note">No events yet.</div>';
+  el.innerHTML = `
+    <button class="btn small secondary" style="margin-bottom:8px" onclick="App.copyLog()">COPY FULL LOG</button>
+    ${B.log.map(e=>`<div class="log-entry"><span class="tag">R${e.round}</span>${e.text}</div>`).join('') || '<div class="small-note">No events yet.</div>'}
+  `;
 }
 
 function renderAll(){ renderHeader(); renderStatePanel(); renderPhase(); renderLog(); }
@@ -1452,6 +1558,30 @@ const App = {
     logEvent(`You sacrificed ${card.name} for +${card.pp||0} DP (total ${B.myDpTotal}).`);
     B.dpStep = 'digivolve';
     renderDpPhase(document.getElementById('phasePanel'));
+    renderStatePanel(); renderHeader();
+  },
+
+  copyLog(){
+    // B.log is stored newest-first (unshift); flip to chronological order for
+    // a readable paste, oldest event first.
+    const text = B.log.slice().reverse().map(e=>`R${e.round} ${e.text}`).join('\n');
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).then(
+        ()=>logEvent('Full log copied to clipboard.'),
+        ()=>alert('Could not copy automatically — select and copy the log manually.')
+      );
+    } else {
+      alert('Clipboard access unavailable — select and copy the log manually.');
+    }
+  },
+
+  applyHpOverride(who){
+    const el = document.getElementById(who==='me'?'myHpOverride':'oppHpOverride');
+    if(!el) return;
+    const val = parseInt(el.value);
+    if(isNaN(val) || val<0){ alert('Enter a valid non-negative number.'); return; }
+    if(who==='me'){ B.myHp = val; logEvent(`Manually corrected your HP to ${val}.`); }
+    else { B.oppHp = val; logEvent(`Manually corrected opponent's HP to ${val}.`); }
     renderStatePanel(); renderHeader();
   },
 
@@ -1621,7 +1751,7 @@ const App = {
 
     let unknownNote = '';
     if(oppAtk==='__unknown__'){
-      const options = ['o','t','x'].map(b=>computeCell(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, b, mySupportTags, oppSupportTags, 0, iAmTurnPlayer, B.myDpPile.length, B.oppDpPile.length));
+      const options = ['o','t','x'].map(b=>computeCell(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, b, mySupportTags, oppSupportTags, 0, iAmTurnPlayer, B.myDpPile.length, B.oppDpPile.length, B.myHand.length, B.oppHand.length));
       const allSame = options.every(c=>c.myDmg===options[0].myDmg && c.oppDmg===options[0].oppDmg);
       if(allSame){
         oppAtk = 'o'; // doesn't matter which -- outcome is identical either way, confirmed below
@@ -1635,7 +1765,7 @@ const App = {
       }
     }
 
-    const cell = computeCell(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppAtk, mySupportTags, oppSupportTags, 0, iAmTurnPlayer, B.myDpPile.length, B.oppDpPile.length);
+    const cell = computeCell(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppAtk, mySupportTags, oppSupportTags, 0, iAmTurnPlayer, B.myDpPile.length, B.oppDpPile.length, B.myHand.length, B.oppHand.length);
     B.oppHp = Math.max(0, B.oppHp - cell.myDmg);
     B.myHp = Math.max(0, B.myHp - cell.oppDmg);
     // HP-modifying effects (heals are typically confirmed permanent; applied after the damage exchange).
