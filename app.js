@@ -782,6 +782,22 @@ function speedDigivolveOptions(myCard, hand){
     return order[c.lvl] === order[myCard.lvl]+1;
   });
 }
+// Scores digivolve/speed-digivolve targets against the opponent's current
+// active (worst-case net damage, same maximin logic as entrance/sacrifice
+// ranking), plus a "stay as current active" baseline so digivolving isn't
+// always assumed to be correct just because a target is eligible.
+function rankDigivolveOptions(currentActive, currentHp, targets, oppActive, oppHp){
+  function valueOf(card, hp){
+    if(!oppActive) return null;
+    const grid = computeMatrix(card, oppActive, hp, (oppHp!=null?oppHp:oppActive.hp), [], 0, true);
+    return maximin(grid).bestVal;
+  }
+  const stayVal = valueOf(currentActive, currentHp);
+  const ranked = targets.map(card=>({ card, matchupVal: valueOf(card, card.hp) }))
+    .sort((a,b)=> (b.matchupVal||0) - (a.matchupVal||0));
+  return { ranked, stayVal };
+}
+
 function hasSpeedDigivolveCard(hand){
   return hand.some(c=> /disregard DP when digivolving/i.test(effectText(c)) || /^Speed-?\s*digivolve$/i.test((c.name||'').trim()));
 }
@@ -1255,13 +1271,16 @@ function renderDpSacrificeStep(el, active, dpTotal){
 
 function renderDpDigivolveStep(el, active, dpTotal){
   const evoOptions = digivolveOptions(active, dpTotal, B.myHand);
+  const { ranked, stayVal } = rankDigivolveOptions(active, B.myHp, evoOptions, B.oppActive, B.oppHp);
+  const stayNote = stayVal!=null ? `<div class="small-note">Staying as ${active.name} (no digivolve): worst-case net ${stayVal}</div>` : '';
   el.innerHTML = `
     <h2>▸ DP PHASE — STEP 2/3: DIGIVOLVE (current DP: ${dpTotal})</h2>
-    <div class="small-note">Eligible now that your DP is banked. Pick one, or skip.</div>
-    ${evoOptions.map(c=>`
+    <div class="small-note">Eligible now that your DP is banked. Ranked by worst-case matchup value against the opponent's active, best first. Pick one, or skip.</div>
+    ${stayNote}
+    ${ranked.map(r=>`
       <div class="suggestion-rank">
-        <span><b>${c.name}</b> (${c.lvl}, needs ${c.dp} DP) — HP ${c.hp}, O ${c.o}/T ${c.t}/X ${c.x}</span>
-        <button class="btn small" onclick="App.doDigivolve('${c._uid}')">DIGIVOLVE</button>
+        <span><b>${r.card.name}</b> (${r.card.lvl}, needs ${r.card.dp} DP) — HP ${r.card.hp}, O ${r.card.o}/T ${r.card.t}/X ${r.card.x}${r.matchupVal!=null?` — worst-case net ${r.matchupVal}`:''}</span>
+        <button class="btn small" onclick="App.doDigivolve('${r.card._uid}')">DIGIVOLVE</button>
       </div>
     `).join('')}
     <button class="btn secondary small" style="margin-top:10px" onclick="App.skipDigivolveStep()">SKIP</button>
@@ -1271,13 +1290,16 @@ function renderDpDigivolveStep(el, active, dpTotal){
 function renderDpSpeedDigivolveStep(el, active, dpTotal){
   const speedCard = findSpeedDigivolveCard(B.myHand);
   const speedOptions = speedDigivolveOptions(active, B.myHand.filter(c=>c._uid!==speedCard._uid));
+  const { ranked, stayVal } = rankDigivolveOptions(active, B.myHp, speedOptions, B.oppActive, B.oppHp);
+  const stayNote = stayVal!=null ? `<div class="small-note">Staying as ${active.name} (no digivolve): worst-case net ${stayVal}</div>` : '';
   el.innerHTML = `
     <h2>▸ DP PHASE — STEP 3/3: SPEED DIGIVOLVE (${speedCard.name} in hand — ignores DP cost)</h2>
-    <div class="small-note">Pick one, or skip.</div>
-    ${speedOptions.map(c=>`
+    <div class="small-note">Ranked by worst-case matchup value against the opponent's active, best first. Pick one, or skip.</div>
+    ${stayNote}
+    ${ranked.map(r=>`
       <div class="suggestion-rank">
-        <span><b>${c.name}</b> (${c.lvl}, DP cost waived) — HP ${c.hp}, O ${c.o}/T ${c.t}/X ${c.x}</span>
-        <button class="btn small" onclick="App.doSpeedDigivolve('${c._uid}')">SPEED DIGIVOLVE</button>
+        <span><b>${r.card.name}</b> (${r.card.lvl}, DP cost waived) — HP ${r.card.hp}, O ${r.card.o}/T ${r.card.t}/X ${r.card.x}${r.matchupVal!=null?` — worst-case net ${r.matchupVal}`:''}</span>
+        <button class="btn small" onclick="App.doSpeedDigivolve('${r.card._uid}')">SPEED DIGIVOLVE</button>
       </div>
     `).join('')}
     <button class="btn secondary small" style="margin-top:10px" onclick="App.skipSpeedDigivolveStep()">SKIP</button>
