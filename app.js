@@ -183,11 +183,19 @@ function parseEffectTags(text, card){
     tags.push({type:'forceBothAttack', attack:wordToAtk(mm[1])});
   }
   if(m = /Own attack becomes\s*(O|T|X|Circle|Triangle|Cross)/i.exec(text)){
+    // Genuine override -- confirmed by live play (Darkrizamon's "Both
+    // players use O" family): this really does change which attack you're
+    // considered to have used, not just its damage.
     tags.push({type:'lockOwnAttack', attack:wordToAtk(m[1])});
   } else if(m = /(O|T|X)\s+and\s+(O|T|X)\s+[Aa]ttack power (?:are|is|becomes) 0/i.exec(text)){
+    // NOT an override -- confirmed by live play (Tsukaimon): this phrasing
+    // just zeroes the two named attacks' damage. It does not redirect your
+    // attack to the third (unnamed) one; if you didn't press that one, any
+    // boost tied to it (e.g. "boost own X +200") simply doesn't apply either,
+    // since it's still gated on the real attack pressed, not a fake one.
     const mentioned = [wordToAtk(m[1]), wordToAtk(m[2])];
-    const locked = ['o','t','x'].find(a=>!mentioned.includes(a));
-    if(locked) tags.push({type:'lockOwnAttack', attack:locked});
+    const spared = ['o','t','x'].find(a=>!mentioned.includes(a));
+    if(spared) tags.push({type:'zeroOwnAttackUnless', attack:spared});
   }
   if(/Opponent'?s attack changes/i.test(text)){
     // Confirmed by live play: this genuinely changes which attack the
@@ -472,6 +480,7 @@ function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSuppo
       if(tag.type==='multiplyOwnAttack') dmg *= tag.mult;
       if(tag.type==='dpCountBoostAttack') dmg += tag.per * ownDpCount;
       if(tag.type==='multiplyAttackByOwnDiscardCount') dmg *= Math.max(1, ownDpCount);
+      if(tag.type==='zeroOwnAttackUnless' && tag.attack!==atk) dmg = 0;
     });
     return Math.max(0, dmg);
   }
@@ -1763,10 +1772,22 @@ const App = {
     // it to a genuinely different attack -- e.g. "X (changed to O)" -- so the
     // log never silently shows "X" when the real attack used was different.
     function attackLabel(chosenAtk, isMine){
-      const relevantTags = isMine ? oppSupportTags : mySupportTags; // redirects always come from the OTHER side's card
-      const redirect = relevantTags.find(t=>t.type==='redirectOtherAttackValue');
-      if(redirect && redirect.map[chosenAtk]){
+      const ownTags = isMine ? mySupportTags : oppSupportTags;
+      const otherTags = isMine ? oppSupportTags : mySupportTags;
+      // Disrupt Ray-style: the OTHER side's card redirects THIS side's attack.
+      const redirect = otherTags.find(t=>t.type==='redirectOtherAttackValue');
+      if(redirect && redirect.map[chosenAtk] && redirect.map[chosenAtk]!==chosenAtk){
         return chosenAtk.toUpperCase()+' (changed to '+redirect.map[chosenAtk].toUpperCase()+')';
+      }
+      // "Own attack becomes X"-style: THIS side's own card overrides its own attack.
+      const lock = ownTags.find(t=>t.type==='lockOwnAttack');
+      if(lock && lock.attack!==chosenAtk){
+        return chosenAtk.toUpperCase()+' (changed to '+lock.attack.toUpperCase()+')';
+      }
+      // "Both players use X"-style: either side's card forces both attacks.
+      const force = ownTags.concat(otherTags).find(t=>t.type==='forceBothAttack');
+      if(force && force.attack!==chosenAtk){
+        return chosenAtk.toUpperCase()+' (changed to '+force.attack.toUpperCase()+')';
       }
       return chosenAtk.toUpperCase();
     }
