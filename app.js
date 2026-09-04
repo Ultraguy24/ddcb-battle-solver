@@ -334,7 +334,6 @@ function parseEffectTags(text, card){
 // sacrificed / "top" of the pile). Total DP is always derived from the pile
 // so it can never drift out of sync with what's actually in it.
 function dpPileTotal(pile){ return (pile||[]).reduce((s,c)=>s+(c.pp||0), 0); }
-function dpPileCount(pile){ return (pile||[]).length; }
 function dpPileDiscardTop(pile, count){
   // Removes up to `count` cards from the top (most recent end) of the pile,
   // returns the discarded cards (for logging / moving to the Offline Deck).
@@ -572,7 +571,7 @@ function maximin(grid){
   return {best, bestVal};
 }
 
-function rankSupportOptions(myCard, oppCard, myHp, oppHp, fixedA, hand, oppSupportTagsKnown, hiddenBuffer, iAmTurnPlayer, myDpCount, oppDpCount){
+function rankSupportOptions(myCard, oppCard, myHp, oppHp, fixedA, hand, oppSupportTagsKnown, hiddenBuffer, iAmTurnPlayer, myDpCount, oppDpCount, myHandCount, oppHandCount){
   const candidates = [{id:'', name:'— none —', tags:[]}].concat(
     hand.map(c=>({id:String(c._uid||c.id), name:c.name + (c.type==='option'?' (option)':''), tags:parseEffectTags(effectText(c), c)}))
   );
@@ -641,7 +640,7 @@ function rankEntranceCandidates(hand, oppActive, oppHp){
     const eff = effectQualityNote(card);
     let matchupVal = null;
     if(oppActive){
-      const grid = computeMatrix(card, oppActive, card.hp, (oppHp!=null?oppHp:oppActive.hp), [], 0, true);
+      const grid = computeMatrix(card, oppActive, card.hp, (oppHp!=null?oppHp:oppActive.hp), [], 0, true, B.myDpPile.length, B.oppDpPile.length, B.myHand.length, B.oppHand.length);
       matchupVal = maximin(grid).bestVal;
     }
     const avgAtk = Math.round((card.o+card.t+card.x)/3);
@@ -653,7 +652,7 @@ function rankEntranceCandidates(hand, oppActive, oppHp){
   });
 }
 
-function rankSupportOptionsOpenInfo(myCard, oppCard, myHp, oppHp, fixedA, myHand, oppHandCards, iAmTurnPlayer, myDpCount, oppDpCount){
+function rankSupportOptionsOpenInfo(myCard, oppCard, myHp, oppHp, fixedA, myHand, oppHandCards, iAmTurnPlayer, myDpCount, oppDpCount, myHandCount, oppHandCount){
   const myCandidates = [{id:'', name:'— none —', tags:[]}].concat(
     myHand.map(c=>({id:String(c._uid||c.id), name:c.name + (c.type==='option'?' (option)':''), tags:parseEffectTags(effectText(c), c)}))
   );
@@ -664,7 +663,7 @@ function rankSupportOptionsOpenInfo(myCard, oppCard, myHp, oppHp, fixedA, myHand
     let worst = Infinity;
     ['o','t','x'].forEach(b=>{
       oppSupportCandidates.forEach(oppTags=>{
-        const cell = computeCell(myCard, oppCard, myHp, oppHp, fixedA, b, cand.tags, oppTags, 0, iAmTurnPlayer, myDpCount, oppDpCount);
+        const cell = computeCell(myCard, oppCard, myHp, oppHp, fixedA, b, cand.tags, oppTags, 0, iAmTurnPlayer, myDpCount, oppDpCount, myHandCount, oppHandCount);
         const net = cell.myDmg - cell.oppDmg;
         if(net<worst) worst = net;
       });
@@ -679,7 +678,7 @@ function rankSupportOptionsOpenInfo(myCard, oppCard, myHp, oppHp, fixedA, myHand
 // the right lens; the opponent's response is still treated adversarially).
 // oppSupportSets: either a single known tag array, or an array of possible
 // tag arrays (e.g. from their tracked hand) to treat as opponent options too.
-function randomCardExpectedValue(myCard, oppCard, myHp, oppHp, fixedA, oppSupportSets, hiddenBuffer, iAmTurnPlayer, myDpCount, oppDpCount){
+function randomCardExpectedValue(myCard, oppCard, myHp, oppHp, fixedA, oppSupportSets, hiddenBuffer, iAmTurnPlayer, myDpCount, oppDpCount, myHandCount, oppHandCount){
   const remaining = getRemainingDeckList();
   if(!remaining.length) return null;
   const sets = (oppSupportSets.length && Array.isArray(oppSupportSets[0])) ? oppSupportSets : [oppSupportSets||[]];
@@ -690,7 +689,7 @@ function randomCardExpectedValue(myCard, oppCard, myHp, oppHp, fixedA, oppSuppor
     let worst = Infinity;
     ['o','t','x'].forEach(b=>{
       sets.forEach(oppTags=>{
-        const cell = computeCell(myCard, oppCard, myHp, oppHp, fixedA, b, tags, oppTags, hiddenBuffer||0, iAmTurnPlayer, myDpCount, oppDpCount);
+        const cell = computeCell(myCard, oppCard, myHp, oppHp, fixedA, b, tags, oppTags, hiddenBuffer||0, iAmTurnPlayer, myDpCount, oppDpCount, myHandCount, oppHandCount);
         const net = cell.myDmg - cell.oppDmg;
         if(net<worst) worst = net;
       });
@@ -796,20 +795,19 @@ function speedDigivolveOptions(myCard, hand){
 // ranking), plus a "stay as current active" baseline so digivolving isn't
 // always assumed to be correct just because a target is eligible.
 function rankDigivolveOptions(currentActive, currentHp, targets, oppActive, oppHp){
-  function valueOf(card, hp){
+  function valueOf(card, hp, dpCount, handCount){
     if(!oppActive) return null;
-    const grid = computeMatrix(card, oppActive, hp, (oppHp!=null?oppHp:oppActive.hp), [], 0, true);
+    const grid = computeMatrix(card, oppActive, hp, (oppHp!=null?oppHp:oppActive.hp), [], 0, true, dpCount, B.oppDpPile.length, handCount, B.oppHand.length);
     return maximin(grid).bestVal;
   }
-  const stayVal = valueOf(currentActive, currentHp);
-  const ranked = targets.map(card=>({ card, matchupVal: valueOf(card, card.hp) }))
+  // Staying put: DP and hand are unchanged. Digivolving: DP resets to 0
+  // (spending the whole pool is mandatory), and the card used leaves hand.
+  const stayVal = valueOf(currentActive, currentHp, B.myDpPile.length, B.myHand.length);
+  const ranked = targets.map(card=>({ card, matchupVal: valueOf(card, card.hp, 0, Math.max(0, B.myHand.length-1)) }))
     .sort((a,b)=> (b.matchupVal||0) - (a.matchupVal||0));
   return { ranked, stayVal };
 }
 
-function hasSpeedDigivolveCard(hand){
-  return hand.some(c=> /disregard DP when digivolving/i.test(effectText(c)) || /^Speed-?\s*digivolve$/i.test((c.name||'').trim()));
-}
 function findSpeedDigivolveCard(hand){
   return hand.find(c=> /disregard DP when digivolving/i.test(effectText(c)) || /^Speed-?\s*digivolve$/i.test((c.name||'').trim()));
 }
@@ -1135,23 +1133,29 @@ function renderEntrancePhase(el){
 // Digivolving isn't just a stat upgrade -- it fully resets HP to the new
 // form's printed value. When critically low, banking DP toward a digivolve
 // you don't have in hand yet is a real defensive play, not just a vague
-// "future value" -- estimate what that's actually worth using the real
-// card pool (same specialty, one level up) rather than a flat multiplier
-// that's too small to ever matter. This can't know what's actually left in
-// THIS deck (already-drawn/sacrificed copies aren't tracked here), so it's
-// discounted as an uncertain, several-turns-out payoff, not a sure thing.
+// "future value" -- estimate what that's actually worth. Prefers the real
+// tracked remaining deck (knows exactly what's left, since deck size is
+// small and finite) when a deck is selected; falls back to the general card
+// pool, discounted more heavily, when there's no deck tracking active.
 function estimateDigivolveEscapeValue(myActive, myHp){
   if(!myActive || myHp==null) return 0;
   const nextLevel = {R:'C', C:'U', A:'C'}[myActive.lvl];
   if(!nextLevel) return 0;
-  const candidates = ALL_CARDS.filter(c=>c.type==='digimon' && c.sp===myActive.sp && c.lvl===nextLevel);
+  const deck = getSelectedDeck();
+  let candidates, discount;
+  if(deck){
+    candidates = getRemainingDeckList()
+      .filter(({card})=>card.type==='digimon' && card.sp===myActive.sp && card.lvl===nextLevel)
+      .flatMap(({card,count})=>Array(count).fill(card));
+    discount = 0.35; // known to actually be left in this specific deck
+  } else {
+    candidates = ALL_CARDS.filter(c=>c.type==='digimon' && c.sp===myActive.sp && c.lvl===nextLevel);
+    discount = 0.2; // no deck tracking -- just "exists somewhere in the game"
+  }
   if(!candidates.length) return 0;
   const avgHp = candidates.reduce((s,c)=>s+c.hp,0) / candidates.length;
   const restorePotential = Math.max(0, avgHp - myHp);
-  // Discounted hard: this depends on actually drawing a matching card later,
-  // which isn't guaranteed. ~20% reflects "plausible within a few turns if
-  // your deck has the usual 2 copies," not "will definitely happen."
-  return restorePotential * 0.2;
+  return restorePotential * discount;
 }
 
 function bankingBonus(currentDp, ppGained){
@@ -1410,10 +1414,10 @@ function renderAttackPhase(el){
 
   if(B.atkStep==='myReactiveSupport'){
     const oppTags = B.oppSupportRevealed ? parseEffectTags(effectText(B.oppSupportRevealed), B.oppSupportRevealed) : [];
-    const ranked = rankSupportOptions(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, B.myHand, oppTags, 0, iAmTurnPlayer, B.myDpPile.length, B.oppDpPile.length);
+    const ranked = rankSupportOptions(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, B.myHand, oppTags, 0, iAmTurnPlayer, B.myDpPile.length, B.oppDpPile.length, B.myHand.length, B.oppHand.length);
     const redirectTag = oppTags.find(t=>t.type==='redirectOtherAttackValue');
     const redirectWarning = redirectTag ? `<div class="warn-box">${B.oppSupportRevealed.name} changes your locked ${B.myLockedAtk.toUpperCase()} into <b>${redirectTag.map[B.myLockedAtk].toUpperCase()}</b> for real — it's treated as if you'd pressed ${redirectTag.map[B.myLockedAtk].toUpperCase()} the whole time. Support you pick that boosts "${B.myLockedAtk.toUpperCase()}" specifically will no longer apply; the opponent's Cross ability (if tied to ${redirectTag.map[B.myLockedAtk].toUpperCase()}) can now trigger instead. Scored against the redirected attack below.</div>` : '';
-    const randomEv = getSelectedDeck() ? randomCardExpectedValue(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppTags, 0, iAmTurnPlayer, B.myDpPile.length, B.oppDpPile.length) : null;
+    const randomEv = getSelectedDeck() ? randomCardExpectedValue(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppTags, 0, iAmTurnPlayer, B.myDpPile.length, B.oppDpPile.length, B.myHand.length, B.oppHand.length) : null;
     const combined = ranked.map(r=>({id:r.id, name:r.name, val:r.worst, note:null}));
     if(randomEv){
       combined.push({id:'__random__', name:'Play a random card from my deck', val:randomEv.ev, note:`Expected value across the ${randomEv.poolSize} cards still unaccounted for in your tracked deck.`, approx:true});
@@ -1436,9 +1440,9 @@ function renderAttackPhase(el){
   }
 
   if(B.atkStep==='myBlindSupport'){
-    const ranked = rankSupportOptionsOpenInfo(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, B.myHand, B.oppHand, iAmTurnPlayer, B.myDpPile.length, B.oppDpPile.length);
+    const ranked = rankSupportOptionsOpenInfo(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, B.myHand, B.oppHand, iAmTurnPlayer, B.myDpPile.length, B.oppDpPile.length, B.myHand.length, B.oppHand.length);
     const oppPossibleSets = [[]].concat(B.oppHand.map(c=>parseEffectTags(effectText(c), c)));
-    const randomEv = getSelectedDeck() ? randomCardExpectedValue(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppPossibleSets, 0, iAmTurnPlayer, B.myDpPile.length, B.oppDpPile.length) : null;
+    const randomEv = getSelectedDeck() ? randomCardExpectedValue(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppPossibleSets, 0, iAmTurnPlayer, B.myDpPile.length, B.oppDpPile.length, B.myHand.length, B.oppHand.length) : null;
     const combined = ranked.map(r=>({id:r.id, name:r.name, val:r.worst, note:null}));
     if(randomEv){
       combined.push({id:'__random__', name:'Play a random card from my deck', val:randomEv.ev, note:`Expected value across the ${randomEv.poolSize} cards still unaccounted for in your tracked deck.`, approx:true});
@@ -1918,6 +1922,7 @@ const App = {
     const card = App._pendingMyDrawCard;
     if(!card){ logEvent('Pick a card first.'); return; }
     B.myHand.push(withUid(card));
+    if(getSelectedDeck()){ B.deckUsedThisMatch[card.id] = (B.deckUsedThisMatch[card.id]||0) + 1; }
     logEvent(`You drew ${card.name} (from support draw effect) — added to hand.`);
     App._pendingMyDrawCard = null;
     B.pendingMyDraw--;
