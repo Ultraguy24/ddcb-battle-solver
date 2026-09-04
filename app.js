@@ -1132,6 +1132,28 @@ function renderEntrancePhase(el){
 // typical Champion-tier cost (based on observed data), tapering off once
 // you're already past that threshold since the marginal value of extra
 // banked DP drops once you can already afford most things.
+// Digivolving isn't just a stat upgrade -- it fully resets HP to the new
+// form's printed value. When critically low, banking DP toward a digivolve
+// you don't have in hand yet is a real defensive play, not just a vague
+// "future value" -- estimate what that's actually worth using the real
+// card pool (same specialty, one level up) rather than a flat multiplier
+// that's too small to ever matter. This can't know what's actually left in
+// THIS deck (already-drawn/sacrificed copies aren't tracked here), so it's
+// discounted as an uncertain, several-turns-out payoff, not a sure thing.
+function estimateDigivolveEscapeValue(myActive, myHp){
+  if(!myActive || myHp==null) return 0;
+  const nextLevel = {R:'C', C:'U', A:'C'}[myActive.lvl];
+  if(!nextLevel) return 0;
+  const candidates = ALL_CARDS.filter(c=>c.type==='digimon' && c.sp===myActive.sp && c.lvl===nextLevel);
+  if(!candidates.length) return 0;
+  const avgHp = candidates.reduce((s,c)=>s+c.hp,0) / candidates.length;
+  const restorePotential = Math.max(0, avgHp - myHp);
+  // Discounted hard: this depends on actually drawing a matching card later,
+  // which isn't guaranteed. ~20% reflects "plausible within a few turns if
+  // your deck has the usual 2 copies," not "will definitely happen."
+  return restorePotential * 0.2;
+}
+
 function bankingBonus(currentDp, ppGained){
   if(ppGained<=0) return 0;
   const benchmark = 30;
@@ -1187,11 +1209,18 @@ function rankSacrificeOptions(myActive, myDpTotal, hand, myHp){
       note += ` Unlocks digivolving into ${newlyUnlocked.map(e=>e.name).join(', ')} THIS turn.`;
     } else {
       const baseBonus = bankingBonus(myDpTotal, card.pp||0);
-      const bonus = Math.round(baseBonus * urgency);
+      let bonus = Math.round(baseBonus * urgency);
+      // The old flat urgency multiplier alone tops out far too small to ever
+      // outweigh a real card's opportunity cost -- add the actual escape-hatch
+      // value (restoring HP via a plausible future same-specialty digivolve),
+      // scaled in only as urgency climbs above baseline.
+      const escapeValue = myActive ? estimateDigivolveEscapeValue(myActive, myHp) : 0;
+      const escapeBonus = Math.round(escapeValue * (urgency-1)/2);
+      bonus += escapeBonus;
       if(bonus>0){
         score += bonus;
         note += urgency>1
-          ? ` No immediate target, but your HP is low enough that banked DP is a real escape hatch — digivolving refreshes to full HP (+${bonus} urgent banking value, ${urgency}x).`
+          ? ` No immediate target, but your HP is low enough that banked DP is a real escape hatch — digivolving refreshes to full HP (+${bonus} urgent banking value, ${urgency}x${escapeBonus>0?`, incl. ~${escapeBonus} for realistic HP-restore potential`:''}).`
           : ` No immediate target, but banks progress toward a future digivolve (+${bonus} banking value).`;
       }
     }
