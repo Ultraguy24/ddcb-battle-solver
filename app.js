@@ -151,139 +151,358 @@ function activeGrantsFirstStrike(card, atk){
   return false;
 }
 
-function parseEffectTags(text, card){
-  const tags = []; if(!text) return tags;
-  const fromOption = !!(card && card.type==='option');
-  let m;
-  if(m = /Own\s+(O|T|X|Circle|Triangle|Cross)\s+[Aa]ttack power is doubled/i.exec(text)){
-    tags.push({type:'doubleOwnAttack', attack:wordToAtk(m[1])});
+// ======================= SUPPORT-EFFECT PARSER =======================
+// Card effect text -> tags the solver understands. Text is parsed one SENTENCE at a
+// time, so an "If ..., " prefix only gates the effects in its own sentence ("If foe's
+// Specialty is Nature, own Attack Power is doubled. Draw 1 card." must not gate the
+// draw). A condition the solver can't evaluate (hand size, DP slot counts...) drops
+// that sentence's effects instead of applying them as if the condition were met, and
+// anything combat-relevant that no rule recognises is listed in tags.unmodelled so the
+// UI can say "partly modeled" instead of silently scoring it as nothing.
+const LEVEL_RANK = {R:0, A:0, C:1, U:2}; // Armor ranks with Rookie -- same assumption as digivolveOptions()
+const ATK_ALT = '(O|T|X|Circle|Triangle|Cross)(?![A-Za-z])';
+const SPEC_ALT = '(fire|water|nature|dark(?:ness)?|rare)(?![A-Za-z])';
+function rx(src, flags){ return new RegExp(src.replace(/\{A\}/g, ATK_ALT).replace(/\{SP\}/g, SPEC_ALT), flags||'i'); }
+function normSpecWord(w){ w=(w||'').toLowerCase(); return w.startsWith('dark') ? 'Darkness' : (SPEC_NAME_MAP[w]||null); }
+function normEffectText(t){
+  return String(t||'').replace(/[\u2018\u2019\u02bc]/g,"'").replace(/[\u201c\u201d]/g,'"').replace(/\u00a0/g,' ').replace(/\s+/g,' ').trim();
+}
+function splitEffectSentences(t){
+  return (t.match(/[^.!?]+(?:[.!?]+["']?|$)/g)||[t]).map(s=>s.trim()).filter(Boolean);
+}
+
+function parseEffectCondition(raw){
+  const c = raw.replace(/[.\s]+$/,'').trim(); let m;
+  if(/^both (?:players'? )?attacks? (?:are|is) different$/i.test(c)) return {kind:'attacksDiffer'};
+  if(/^both (?:players'? )?attacks? (?:are|is) (?:the )?same$/i.test(c) || /^both players use the same attack$/i.test(c)) return {kind:'attacksSame'};
+  if(m = rx(String.raw`^(?:opponent|foe) (?:used|uses) {A}(?: attack)?$`).exec(c)) return {kind:'foeAttack', attack:wordToAtk(m[1])};
+  if(m = rx(String.raw`^own attack is (not )?{A}$`).exec(c)) return {kind:'ownAttack', attack:wordToAtk(m[2]), not:!!m[1]};
+  if(m = rx(String.raw`^(?:opponent'?s|foe'?s) specialty is (not )?{SP}(?: or {SP})?$`).exec(c))
+    return {kind:'foeSpec', specs:[normSpecWord(m[2]), m[3]?normSpecWord(m[3]):null].filter(Boolean), not:!!m[1]};
+  if(m = rx(String.raw`^opponent is {SP}$`).exec(c)) return {kind:'foeSpec', specs:[normSpecWord(m[1])], not:false};
+  if(m = rx(String.raw`^own specialty is {SP}$`).exec(c)) return {kind:'ownSpec', specs:[normSpecWord(m[1])]};
+  if(/^both players'? specialties are the same$/i.test(c)) return {kind:'bothSpecSame'};
+  if(m = /^own level is ([RCUA])$/i.exec(c)) return {kind:'ownLevel', lvl:m[1].toUpperCase()};
+  if(m = /^opponent is level ([RCUA])$/i.exec(c) || /^opponent'?s level is ([RCUA])$/i.exec(c)) return {kind:'foeLevel', lvl:m[1].toUpperCase()};
+  if(m = /^both levels are ([RCUA])$/i.exec(c)) return {kind:'bothLevel', lvl:m[1].toUpperCase()};
+  if(/^own level is (?:below(?: opponent'?s)?|lower(?: than opponent'?s)?)$/i.test(c)) return {kind:'levelBelow'};
+  if(/^(?:own )?HP (?:is|are) (?:less|lower) than (?:opponent'?s|foe'?s)(?: HP)?$/i.test(c)) return {kind:'ownHpLess'};
+  if(/^own HP (?:is|are) (?:more|higher|greater) than (?:opponent'?s|foe'?s)(?: HP)?$/i.test(c)) return {kind:'ownHpMore'};
+  if(/^(?:opponent'?s|foe'?s) HP (?:is|are) (?:less|lower) than own(?: HP)?$/i.test(c)) return {kind:'foeHpLess'};
+  if(m = /^own HP (?:is|are) less than (\d+)$/i.exec(c)) return {kind:'ownHpUnder', n:+m[1]};
+  if(m = /^(?:opponent'?s|foe'?s) HP (?:is|are) more than (\d+)$/i.exec(c)) return {kind:'foeHpOver', n:+m[1]};
+  if(m = /^(?:opponent'?s|foe'?s) HP (?:is|are) (\d+)\+$/i.exec(c)) return {kind:'foeHpAtLeast', n:+m[1]};
+  return {kind:'unknown', text:c};
+}
+
+// x = {own, foe (cards), ownHp, foeHp, ownAtk, foeAtk} from the point of view of the
+// player whose support card carries the condition. Everything is checked against the
+// cards / HP / attacks as chosen, before any support effect in the bout changes them.
+function conditionHolds(c, x){
+  if(typeof c==='string') c = {kind:c};
+  switch(c.kind){
+    case 'attacksDiffer': return x.ownAtk !== x.foeAtk;
+    case 'attacksSame':   return x.ownAtk === x.foeAtk;
+    case 'foeAttack':     return x.foeAtk === c.attack;
+    case 'ownAttack':     return c.not ? x.ownAtk !== c.attack : x.ownAtk === c.attack;
+    case 'foeSpec':       return c.specs.includes(x.foe.sp) !== !!c.not;
+    case 'ownSpec':       return c.specs.includes(x.own.sp);
+    case 'bothSpecSame':  return !!x.own.sp && x.own.sp === x.foe.sp;
+    case 'ownLevel':      return x.own.lvl === c.lvl;
+    case 'foeLevel':      return x.foe.lvl === c.lvl;
+    case 'bothLevel':     return x.own.lvl === c.lvl && x.foe.lvl === c.lvl;
+    case 'levelBelow':    return LEVEL_RANK[x.own.lvl] < LEVEL_RANK[x.foe.lvl];
+    case 'ownHpLess':     return x.ownHp < x.foeHp;
+    case 'ownHpMore':     return x.ownHp > x.foeHp;
+    case 'foeHpLess':     return x.foeHp < x.ownHp;
+    case 'ownHpUnder':    return x.ownHp < c.n;
+    case 'foeHpOver':     return x.foeHp > c.n;
+    case 'foeHpAtLeast':  return x.foeHp >= c.n;
+    default:              return false; // unknown conditions never fire
   }
-  if(m = /Opponent'?s\s+(O|T|X|Circle|Triangle|Cross)\s+[Aa]ttack power (?:is|goes to|becomes) 0/i.exec(text)){
-    tags.push({type:'zeroOppAttack', attack:wordToAtk(m[1])});
-  }
-  if(m = /(?:Boost|Reduce) own\s+(O|T|X|Circle|Triangle|Cross)\s+[Aa]ttack power\s*([+-]\d+)/i.exec(text)){
-    tags.push({type:'boostOwnAttackSpecific', attack:wordToAtk(m[1]), amount:parseInt(m[2])});
-  } else if(m = /(?:Boost|Reduce) own attack power\s*([+-]\d+)/i.exec(text)){
-    tags.push({type:'boostOwnAttack', amount:parseInt(m[1])});
-  }
-  if(m = /Recover own HP by\s*\+?(\d+)/i.exec(text)){
-    tags.push({type:'healSelf', amount:parseInt(m[1])});
-  }
-  if(m = /Recover foe'?s HP by\s*\+?(\d+)/i.exec(text)){
-    tags.push({type:'healOpp', amount:parseInt(m[1])});
-  }
-  if(/Own HP are halved/i.test(text)) tags.push({type:'halveSelfHp'});
-  if(/Opponent'?s HP are halved/i.test(text)) tags.push({type:'halveOppHp'});
-  const hasSpecificAttackWord = /Own\s+(O|T|X|Circle|Triangle|Cross)\s+[Aa]ttack/i.test(text);
-  if(/own attack power is tripled/i.test(text) && !hasSpecificAttackWord) tags.push({type:'multiplyOwnAttack', mult:3});
-  if(/own attack power is doubled/i.test(text) && !hasSpecificAttackWord) tags.push({type:'multiplyOwnAttack', mult:2});
-  if(/^Attack first\.?$/i.test(text.trim())) tags.push({type:'firstStrike'});
-  if(/Forces? both players? (?:to use|to choose)\s*(O|T|X|Circle|Triangle|Cross)/i.exec(text) || /Both players use\s*(O|T|X)/i.exec(text)){
-    const mm = /Forces? both players? (?:to use|to choose)\s*(O|T|X|Circle|Triangle|Cross)/i.exec(text) || /Both players use\s*(O|T|X)/i.exec(text);
-    tags.push({type:'forceBothAttack', attack:wordToAtk(mm[1])});
-  }
-  if(m = /Own attack becomes\s*(O|T|X|Circle|Triangle|Cross)/i.exec(text)){
-    tags.push({type:'lockOwnAttack', attack:wordToAtk(m[1])});
-  } else if(m = /(O|T|X)\s+and\s+(O|T|X)\s+[Aa]ttack power (?:are|is|becomes) 0/i.exec(text)){
+}
+function tagActive(t, x){ return !t.condition || conditionHolds(t.condition, x); }
+
+// One rule = [regex, producer]. Rules run in order and each match is blanked out of the
+// working text so a more specific rule can't be double-counted by a more general one
+// below it (e.g. "Boost own X attack power +N" vs "Boost own attack power +N").
+const EFFECT_RULES = [
+  // ---- which attack gets used
+  [rx(String.raw`both players use {A}`),                             m=>[{type:'forceBothAttack', attack:wordToAtk(m[1])}]],
+  [rx(String.raw`forces? both players? (?:to use|to choose) {A}`),   m=>[{type:'forceBothAttack', attack:wordToAtk(m[1])}]],
+  [rx(String.raw`both players'? attacks? become {A}`),               m=>[{type:'forceBothAttack', attack:wordToAtk(m[1])}]],
+  [rx(String.raw`opponent uses {A}(?: attack)?`),                    m=>[{type:'forceOppAttack', attack:wordToAtk(m[1])}]],
+  [rx(String.raw`change it to {A}`),                                 m=>[{type:'forceOppAttack', attack:wordToAtk(m[1])}]],
+  [rx(String.raw`own attack (?:becomes|is) ['"]?\s*eat[ -]?up(?: HP)?[.'"]*`), ()=>[{type:'lockOwnAttack', attack:'x'}, {type:'eatUpHp'}]],
+  [rx(String.raw`own attack becomes {A}`),                           m=>[{type:'lockOwnAttack', attack:wordToAtk(m[1])}]],
+  [rx(String.raw`\buse {A} and\b`),                                  m=>[{type:'lockOwnAttack', attack:wordToAtk(m[1])}]],
+  [rx(String.raw`{A} and {A} attack power (?:are|is|becomes?) 0`),   m=>{
     const mentioned = [wordToAtk(m[1]), wordToAtk(m[2])];
-    const locked = ['o','t','x'].find(a=>!mentioned.includes(a));
-    if(locked) tags.push({type:'lockOwnAttack', attack:locked});
-  }
-  if(/Opponent'?s attack changes/i.test(text)){
-    // Confirmed by play: this swaps only which damage NUMBER is used, not which
-    // button was pressed -- own X/T/O-triggered abilities still key off the
-    // original chosen attack, not the redirected one. (Disrupt Ray: O->T, T->X, X->O)
-    tags.push({type:'redirectOtherAttackValue', map:{o:'t', t:'x', x:'o'}});
-  }
-  // Common "if both attacks are the same/different" conditional prefix --
-  // applies to whatever effect(s) the rest of the sentence produced above.
-  let condition = null;
-  if(/If both (?:players'? )?attacks? (?:are|is) different/i.test(text)) condition = 'attacksDiffer';
-  else if(/If both (?:players'? )?(?:attacks?|use the same attack)/i.test(text) && /same/i.test(text)) condition = 'attacksSame';
-  if(condition) tags.forEach(t=>{ t.condition = condition; });
-  tags.forEach(t=>{ t.fromOption = fromOption; });
+    const locked = ['o','t','x'].find(k=>!mentioned.includes(k));
+    return locked ? [{type:'lockOwnAttack', attack:locked}] : [];
+  }],
+  // ---- turn order
+  [rx(String.raw`attack first`),                                     ()=>[{type:'firstStrike'}]],
+  // ---- both players' attack numbers
+  [rx(String.raw`both players boost attack(?: power)? (?:by )?([+-]?\d+)`), m=>[{type:'boostBothAttack', amount:parseInt(m[1])}]],
+  [rx(String.raw`(boost|lower) both players'? attack(?: power)? (?:by )?([+-]?)\s*(\d+)`), m=>[{type:'boostBothAttack', amount:(/lower/i.test(m[1])||m[2]==='-'?-1:1)*parseInt(m[3])}]],
+  [rx(String.raw`both players'? attack(?: power)? (?:become|becomes|is|are) 0`), ()=>[{type:'zeroBothAttack'}]],
+  // ---- own attack number
+  [rx(String.raw`own attack power \+(\d+) & HP \+(\d+)`),            m=>[{type:'boostOwnAttack', amount:+m[1]}, {type:'healSelf', amount:+m[2]}]],
+  [rx(String.raw`boost (?:own )?{A} attack(?: power)? (?:by )?([+-]?\d+)`), m=>[{type:'boostOwnAttackSpecific', attack:wordToAtk(m[1]), amount:parseInt(m[2])}]],
+  [rx(String.raw`(boost|lower|reduce) (?:own )?attack(?: power)? (?:by )?([+-]?)\s*(\d+)`), m=>[{type:'boostOwnAttack', amount:(/lower|reduce/i.test(m[1])||m[2]==='-'?-1:1)*parseInt(m[3])}]],
+  [rx(String.raw`own {A} attack(?: power)? (?:is|are) doubled`),     m=>[{type:'doubleOwnAttack', attack:wordToAtk(m[1])}]],
+  [rx(String.raw`own {A} attack(?: power)? (?:is|are) (tripled|halved)`), m=>[{type:'multiplyOwnAttack', attack:wordToAtk(m[1]), mult:/tripled/i.test(m[2])?3:0.5}]],
+  [rx(String.raw`own attack(?: power)? (?:is|are) (doubled|tripled|halved)`), m=>[{type:'multiplyOwnAttack', mult:{doubled:2, tripled:3, halved:0.5}[m[1].toLowerCase()]}]],
+  [rx(String.raw`own attack(?: power)? becomes (\d+)`),              m=>[{type:'setOwnAttack', value:+m[1]}]],
+  [rx(String.raw`own (?:{A} )?attack(?: power)? (?:is|becomes|matches) (?:the )?(?:same as )?(?:own )?HP(?:, then own HP are halved)?`),
+    m=>[{type:'ownAttackEqualsHp', attack:m[1]?wordToAtk(m[1]):null, thenHalve:/then own HP are halved/i.test(m[0])}]],
+  // ---- opponent's attack number
+  [rx(String.raw`(?:lower|reduce) (?:opponent'?s|foe'?s)(?: {A})? (?:attack|power)(?: power)? to (\d+)`), m=>{
+    const atk = m[1] ? wordToAtk(m[1]) : null, v = +m[2];
+    return [v===0 ? {type:'zeroOppAttack', attack:atk} : {type:'capOppAttack', attack:atk, value:v}];
+  }],
+  [rx(String.raw`(?:lower|reduce) (?:opponent'?s|foe'?s)(?: {A})? attack(?: power)? (?:by )?-?\s*(\d+)`), m=>[{type:'lowerOppAttack', attack:m[1]?wordToAtk(m[1]):null, amount:+m[2]}]],
+  [rx(String.raw`\b(?:opponent'?s|foe'?s|his) (?:{A} )?attack(?: power)? (?:is|are|goes to|go to|becomes?) (\d+)`), m=>{
+    const atk = m[1] ? wordToAtk(m[1]) : null, v = +m[2];
+    return [v===0 ? {type:'zeroOppAttack', attack:atk} : {type:'setOppAttack', attack:atk, value:v}];
+  }],
+  [rx(String.raw`\b(?:opponent'?s|his) attack(?: power)? (?:is|are) (doubled|tripled|halved)`), m=>[{type:'scaleOppAttack', mult:{doubled:2, tripled:3, halved:0.5}[m[1].toLowerCase()]}]],
+  [rx(String.raw`opponent'?s attack changes`), ()=>[{type:'redirectOtherAttackValue', map:{o:'t', t:'x', x:'o'}}]], // Disrupt Ray: swaps only the damage NUMBER used, not the button pressed (confirmed by play)
+  // ---- HP
+  [rx(String.raw`both players'? HP are halved`),                     ()=>[{type:'halveSelfHp'}, {type:'halveOppHp'}]],
+  [rx(String.raw`HP of both players are (\d+)`),                     m=>[{type:'setSelfHp', amount:+m[1]}, {type:'setOppHp', amount:+m[1]}]],
+  [rx(String.raw`recover (?:foe'?s|opponent'?s) HP (?:by )?\+?(\d+)`), m=>[{type:'healOpp', amount:+m[1]}]],
+  [rx(String.raw`recover (?:own )?HP,? (?:by )?\+?(\d+)`),           m=>[{type:'healSelf', amount:+m[1]}]],
+  [rx(String.raw`own HP (?:are|is) halved`),                         ()=>[{type:'halveSelfHp'}]],
+  [rx(String.raw`(?:opponent'?s|foe'?s) HP (?:are|is) halved`),      ()=>[{type:'halveOppHp'}]],
+  [rx(String.raw`(?:opponent'?s|foe'?s) HP (?:are|is) doubled`),     ()=>[{type:'doubleOppHp'}]],
+  [rx(String.raw`own HP becomes same as opponent'?s`),               ()=>[{type:'copyOppHpToSelf'}]],
+  [rx(String.raw`opponent'?s HP become same as own`),                ()=>[{type:'copySelfHpToOpp'}]],
+  [rx(String.raw`own HP becomes (\d+)`),                             m=>[{type:'setSelfHp', amount:+m[1]}]],
+  [rx(String.raw`(?:opponent'?s|foe'?s) HP (?:becomes|become) (\d+)`), m=>[{type:'setOppHp', amount:+m[1]}]],
+  [rx(String.raw`switch HP with opponent`),                          ()=>[{type:'swapHp'}]],
+  // ---- voids and specialty changes
+  [rx(String.raw`opponent'?s support and option effects are voided`), ()=>[{type:'voidOppSupport', options:true}]],
+  [rx(String.raw`opponent'?s support effects? (?:is|are) voided`),   ()=>[{type:'voidOppSupport', options:false}]],
+  [rx(String.raw`changes? own specialty to {SP}`),                   m=>[{type:'setOwnSpec', spec:normSpecWord(m[1])}]],
+  [rx(String.raw`changes? (?:opponent'?s|foe'?s) specialty to {SP}`), m=>[{type:'setOppSpec', spec:normSpecWord(m[1])}]],
+  [rx(String.raw`changes? both players'? specialt(?:y|ies) to {SP}`), m=>[{type:'setBothSpec', spec:normSpecWord(m[1])}]],
+  [rx(String.raw`swap own specialty with opponent'?s specialty`),    ()=>[{type:'swapSpec'}]],
+  [rx(String.raw`opponent'?s specialty becomes same as own specialty`), ()=>[{type:'copyOwnSpecToOpp'}]],
+];
+// Texts that never matter to the damage / HP maths: digivolution rules and revival text
+// (a revived Digimon still loses the bout), plus clause-level upkeep next to a real effect
+// (deck, hand and DP-slot changes). Whatever is left after the rules and these has
+// combat-sounding words in it gets reported as unmodelled.
+const WHOLE_IGNORE = [
+  /^can (?:digivolve|disregard)\b/i, /^digivolve a\b/i, /^downgrade\b/i, /^hp doubles if successful/i,
+  /^(?:no effect|none)\b/i, /^(?:digimon )?ko'?d\b/i, /^battle is still lost/i
+];
+const CLAUSE_IGNORE = [
+  /^(?:randomly )?discard\b/i, /^(?:opponent|foe) discards\b/i, /^both players discard\b/i, /^draw\b/i,
+  /^(?:move|return|pick|look|shuffle)\b/i
+];
+const COMBAT_WORDS = /attack|power|\bHP\b|specialty|level|void|counter|first|second|swap|copy|recover|boost|lower|reduce|doubl|halv|tripl|multipl|\badd\b|switch/i;
+
+function parseEffectBody(body){
+  if(WHOLE_IGNORE.some(r=>r.test(body.trim()))) return {found:[], left:[]};
+  let work = ' '+body+' ';
+  const found = [];
+  EFFECT_RULES.forEach(([re, make])=>{
+    let m, guard = 0;
+    while((m = re.exec(work)) && guard++ < 5){
+      make(m).forEach(t=>found.push(t));
+      work = work.slice(0, m.index) + ' ' + work.slice(m.index + m[0].length);
+    }
+  });
+  const left = work.split(/[,;&]| and | then /i).map(s=>s.replace(/\s+/g,' ').replace(/^[\s.'"]+|[\s.'"]+$/g,''))
+    .filter(s=>s && COMBAT_WORDS.test(s) && !CLAUSE_IGNORE.some(r=>r.test(s)));
+  return {found, left};
+}
+
+const _effectParseCache = new Map();
+function parseEffectTags(text, card){
+  const tags = []; tags.unmodelled = [];
+  if(!text) return tags;
+  const fromOption = !!(card && card.type==='option');
+  const key = (fromOption?'o|':'d|')+text;
+  const hit = _effectParseCache.get(key);
+  if(hit) return hit;
+  splitEffectSentences(normEffectText(text)).forEach(sentence=>{
+    let cond = null, body = sentence;
+    const mc = /^if\s+(.+?),\s*(.+)$/i.exec(sentence);
+    if(mc){ cond = parseEffectCondition(mc[1]); body = mc[2]; }
+    const {found, left} = parseEffectBody(body);
+    if(cond && cond.kind==='unknown'){ if(found.length || left.length) tags.unmodelled.push(sentence); return; }
+    found.forEach(t=>{ if(cond) t.condition = cond; t.fromOption = fromOption; tags.push(t); });
+    left.forEach(l=>tags.unmodelled.push(l));
+  });
+  _effectParseCache.set(key, tags);
   return tags;
 }
 
+// ======================= BOUT ENGINE =======================
+// Own-attack modifiers run in tag order on a running value; effects aimed at the other
+// player's attack are a second pass. Order matches the original solver: my aimed effects
+// hit the opponent's number BEFORE their own boosts apply, theirs hit mine AFTER.
+function applyOwnMods(tags, atk, v){
+  tags.forEach(t=>{
+    switch(t.type){
+      case 'boostOwnAttack': v += t.amount; break;
+      case 'boostOwnAttackSpecific': if(t.attack===atk) v += t.amount; break;
+      case 'doubleOwnAttack': if(t.attack===atk) v *= 2; break;
+      case 'multiplyOwnAttack': if(!t.attack || t.attack===atk) v *= t.mult; break;
+      case 'setOwnAttack': v = t.value; break;
+    }
+  });
+  return v;
+}
+function applyAimedMods(tags, victimAtk, v){
+  tags.forEach(t=>{
+    const hit = !t.attack || t.attack===victimAtk;
+    switch(t.type){
+      case 'zeroOppAttack': if(hit) v = 0; break;
+      case 'setOppAttack': if(hit) v = t.value; break;
+      case 'capOppAttack': if(hit) v = Math.min(v, t.value); break;
+      case 'lowerOppAttack': if(hit) v = Math.max(0, v - t.amount); break;
+      case 'scaleOppAttack': v *= t.mult; break;
+    }
+  });
+  return v;
+}
+
+// One bout, resolved the way the game plays it:
+//  1. Conditional support effects are checked against the cards/HP/attacks as chosen.
+//  2. Voids / jamming, forced attacks and specialty changes are applied.
+//  3. Support effects that change HP (heal, halve, "HP becomes", HP swap) land BEFORE
+//     the attacks, so a heal can lift a Digimon out of KO range and a halving can drop
+//     it into it (support effects resolve before the bout begins -- confirmed by play).
+//  4. The first attacker strikes; if that KOs the other Digimon it never gets to attack.
+//     Eat-up HP heals and Crash's "HP becomes 10" happen as part of the attacker's own
+//     strike, so Crash leaves the attacker on 10 HP for whatever hits it next.
+// Returns damage as executed, KO flags and the HP each side ends the bout on.
 function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSupportTags, hiddenBuffer, iAmTurnPlayer){
   mySupportTags = mySupportTags||[]; oppSupportTags = oppSupportTags||[]; hiddenBuffer = hiddenBuffer||0;
-  const origA = a, origB = b;
-  function conditionMet(tag){
-    if(!tag.condition) return true;
-    if(tag.condition==='attacksDiffer') return origA !== origB;
-    if(tag.condition==='attacksSame') return origA === origB;
-    return true;
-  }
-  mySupportTags = mySupportTags.filter(conditionMet);
-  oppSupportTags = oppSupportTags.filter(conditionMet);
+  const origA = a, origB = b, myHp0 = myHp, oppHp0 = oppHp;
 
-  // Jamming: "Opponent's Support Effect is Voided. Can't Void Option Effect."
-  // Only triggers when its owner presses Cross, like every other xt ability.
-  if(a==='x' && xtGrantsJamming(myCard.xt)){
-    oppSupportTags = oppSupportTags.filter(t=>t.fromOption);
-  }
-  if(b==='x' && xtGrantsJamming(oppCard.xt)){
-    mySupportTags = mySupportTags.filter(t=>t.fromOption);
-  }
+  // 1. conditions
+  const myX  = {own:myCard,  foe:oppCard, ownHp:myHp0,  foeHp:oppHp0, ownAtk:origA, foeAtk:origB};
+  const oppX = {own:oppCard, foe:myCard,  ownHp:oppHp0, foeHp:myHp0,  ownAtk:origB, foeAtk:origA};
+  let myT  = mySupportTags.filter(t=>tagActive(t, myX));
+  let oppT = oppSupportTags.filter(t=>tagActive(t, oppX));
 
-  mySupportTags.concat(oppSupportTags).forEach(tag=>{
-    if(tag.type==='forceBothAttack'){ a = tag.attack; b = tag.attack; }
+  // 2a. voids -- "support effect" voids Digimon-card supports only, "support and option" voids both
+  const myVoid = myT.filter(t=>t.type==='voidOppSupport'), oppVoid = oppT.filter(t=>t.type==='voidOppSupport');
+  if(oppVoid.length) myT  = oppVoid.some(v=>v.options) ? [] : myT.filter(t=>t.fromOption);
+  if(myVoid.length)  oppT = myVoid.some(v=>v.options)  ? [] : oppT.filter(t=>t.fromOption);
+  // Jamming: "Opponent's Support Effect is Voided. Can't Void Option Effect." Only triggers
+  // when its owner presses Cross, like every other xt ability.
+  if(a==='x' && xtGrantsJamming(myCard.xt))  oppT = oppT.filter(t=>t.fromOption);
+  if(b==='x' && xtGrantsJamming(oppCard.xt)) myT  = myT.filter(t=>t.fromOption);
+
+  // 2b. forced / locked attacks
+  myT.concat(oppT).forEach(t=>{ if(t.type==='forceBothAttack'){ a = t.attack; b = t.attack; } });
+  myT.forEach(t=>{  if(t.type==='forceOppAttack') b = t.attack; if(t.type==='lockOwnAttack') a = t.attack; });
+  oppT.forEach(t=>{ if(t.type==='forceOppAttack') a = t.attack; if(t.type==='lockOwnAttack') b = t.attack; });
+
+  // 2c. specialty changes (feed the "<Specialty> foe x3" Cross bonuses)
+  let mySp = myCard.sp, oppSp = oppCard.sp;
+  [[myT,true],[oppT,false]].forEach(([tags, mine])=>{
+    tags.forEach(t=>{
+      if(t.type==='setOwnSpec'){ if(mine) mySp = t.spec; else oppSp = t.spec; }
+      else if(t.type==='setOppSpec'){ if(mine) oppSp = t.spec; else mySp = t.spec; }
+      else if(t.type==='setBothSpec'){ mySp = t.spec; oppSp = t.spec; }
+      else if(t.type==='swapSpec'){ const tmp = mySp; mySp = oppSp; oppSp = tmp; }
+      else if(t.type==='copyOwnSpecToOpp'){ if(mine) oppSp = mySp; else mySp = oppSp; }
+    });
   });
-  mySupportTags.forEach(tag=>{ if(tag.type==='lockOwnAttack'){ a = tag.attack; } });
-  oppSupportTags.forEach(tag=>{ if(tag.type==='lockOwnAttack'){ b = tag.attack; } });
+  const myE  = mySp===myCard.sp   ? myCard  : Object.assign({}, myCard,  {sp:mySp});
+  const oppE = oppSp===oppCard.sp ? oppCard : Object.assign({}, oppCard, {sp:oppSp});
 
-  // Value-only redirects (e.g. Disrupt Ray): change which damage NUMBER is used
-  // without changing which attack was actually "pressed" -- own-attack-triggered
-  // abilities (negation, foe multipliers, first strike) still key off a/b as-is.
+  // 3. support effects that change HP, before any attack
+  let hpMe = myHp0, hpOpp = oppHp0, myHalve = false, oppHalve = false;
+  const hpNotes = [], ops = [];
+  [[myT,'me'],[oppT,'opp']].forEach(([tags, who])=>{
+    const foe = who==='me' ? 'opp' : 'me';
+    tags.forEach(t=>{
+      switch(t.type){
+        case 'swapHp':          ops.push({k:0}); break;
+        case 'setSelfHp':       ops.push({k:1, who, v:t.amount}); break;
+        case 'setOppHp':        ops.push({k:1, who:foe, v:t.amount}); break;
+        case 'copyOppHpToSelf': ops.push({k:2, to:who, from:foe}); break;
+        case 'copySelfHpToOpp': ops.push({k:2, to:foe, from:who}); break;
+        case 'halveSelfHp':     ops.push({k:3, who, f:0.5}); break;
+        case 'halveOppHp':      ops.push({k:3, who:foe, f:0.5}); break;
+        case 'doubleOppHp':     ops.push({k:3, who:foe, f:2}); break;
+        case 'healSelf':        ops.push({k:4, who, v:t.amount}); break;
+        case 'healOpp':         ops.push({k:4, who:foe, v:t.amount}); break;
+      }
+    });
+  });
+  const who2 = w=>w==='me' ? 'your' : "opponent's";
+  ops.filter(o=>o.k===0).forEach(()=>{ const t = hpMe; hpMe = hpOpp; hpOpp = t; hpNotes.push('HP was swapped'); });
+  ops.filter(o=>o.k===1).forEach(o=>{ if(o.who==='me') hpMe = o.v; else hpOpp = o.v; hpNotes.push(`${who2(o.who)} HP became ${o.v}`); });
+  ops.filter(o=>o.k===2).forEach(o=>{ const v = o.from==='me' ? hpMe : hpOpp; if(o.to==='me') hpMe = v; else hpOpp = v; hpNotes.push(`${who2(o.to)} HP became ${v}`); });
+  ops.filter(o=>o.k===3).forEach(o=>{
+    if(o.who==='me'){ hpMe = Math.floor(hpMe*o.f); if(o.f<1) myHalve = true; } else { hpOpp = Math.floor(hpOpp*o.f); if(o.f<1) oppHalve = true; }
+    hpNotes.push(`${who2(o.who)} HP ${o.f<1 ? 'was halved' : 'was doubled'}`);
+  });
+  let myHealAmt = 0, oppHealAmt = 0;
+  ops.filter(o=>o.k===4).forEach(o=>{
+    if(o.who==='me'){ hpMe += o.v; myHealAmt += o.v; hpNotes.push(`you recovered ${o.v} HP`); }
+    else { hpOpp += o.v; oppHealAmt += o.v; hpNotes.push(`opponent recovered ${o.v} HP`); }
+  });
+
+  // 4. attack numbers
+  let bothBoost = 0, zeroBoth = false;
+  myT.concat(oppT).forEach(t=>{ if(t.type==='boostBothAttack') bothBoost += t.amount; if(t.type==='zeroBothAttack') zeroBoth = true; });
+
+  // Value-only redirects (e.g. Disrupt Ray): change which damage NUMBER is used without
+  // changing which attack was actually "pressed" -- own-attack-triggered abilities
+  // (negation, foe multipliers, first strike) still key off a/b as-is.
   let aVal = a, bVal = b;
-  mySupportTags.forEach(tag=>{ if(tag.type==='redirectOtherAttackValue'){ bVal = tag.map[b]; } });
-  oppSupportTags.forEach(tag=>{ if(tag.type==='redirectOtherAttackValue'){ aVal = tag.map[a]; } });
+  myT.forEach(t=>{  if(t.type==='redirectOtherAttackValue') bVal = t.map[b]; });
+  oppT.forEach(t=>{ if(t.type==='redirectOtherAttackValue') aVal = t.map[a]; });
 
-  // Counter Attack: "If Opponent uses [X] Attack, it will miss. Then you
-  // counter with opponent's [X] attack power." Only live when its owner
-  // presses Cross (hence these cards print X:0 -- that's the whiff fallback
-  // when the opponent doesn't pick the matching attack).
+  // Counter Attack: "If Opponent uses [X] Attack, it will miss. Then you counter with
+  // opponent's [X] attack power." Only live when its owner presses Cross (hence these
+  // cards print X:0 -- that's the whiff fallback when the opponent doesn't pick the match).
   const myCounter = a==='x' ? parseCounterTag(myCard.xt) : null;
   const oppCounter = b==='x' ? parseCounterTag(oppCard.xt) : null;
-  const myCountering = myCounter && myCounter.toLowerCase()===b;
-  const oppCountering = oppCounter && oppCounter.toLowerCase()===a;
+  const myCountering = !!myCounter && myCounter.toLowerCase()===b;
+  const oppCountering = !!oppCounter && oppCounter.toLowerCase()===a;
 
-  // Crash: "Attack Power becomes same as HP. HP becomes 10."
+  // HP-based attacks use the attacker's HP at the moment it strikes: Crash ("Attack Power
+  // becomes same as HP. HP becomes 10."), "attack power is same as HP", Mega Hand.
   const myCrashing = a==='x' && isCrashXTag(myCard.xt);
   const oppCrashing = b==='x' && isCrashXTag(oppCard.xt);
+  const myHpTag  = myT.find(t=>t.type==='ownAttackEqualsHp' && (!t.attack || t.attack===a));
+  const oppHpTag = oppT.find(t=>t.type==='ownAttackEqualsHp' && (!t.attack || t.attack===b));
+  const myHpBased = !myCountering && (myCrashing || !!myHpTag);
+  const oppHpBased = !oppCountering && (oppCrashing || !!oppHpTag);
+  const myEatUp  = (a==='x' && isEatUpHpXTag(myCard.xt))  || myT.some(t=>t.type==='eatUpHp');
+  const oppEatUp = (b==='x' && isEatUpHpXTag(oppCard.xt)) || oppT.some(t=>t.type==='eatUpHp');
 
-  let myDmg = myCountering ? baseVal(oppCard, b) : (myCrashing ? myHp : effectiveDamage(myCard, a, oppCard, aVal));
-  let oppDmg = oppCountering ? baseVal(myCard, a) : (oppCrashing ? oppHp : effectiveDamage(oppCard, b, myCard, bVal));
+  const baseMy  = myCountering  ? baseVal(oppE, b) : effectiveDamage(myE,  a, oppE, aVal);
+  const baseOpp = oppCountering ? baseVal(myE,  a) : effectiveDamage(oppE, b, myE,  bVal);
 
-  mySupportTags.forEach(tag=>{
-    if(tag.type==='boostOwnAttack') myDmg += tag.amount;
-    if(tag.type==='boostOwnAttackSpecific' && tag.attack===a) myDmg += tag.amount;
-    if(tag.type==='doubleOwnAttack' && tag.attack===a) myDmg *= 2;
-    if(tag.type==='multiplyOwnAttack') myDmg *= tag.mult;
-    if(tag.type==='zeroOppAttack' && (!tag.attack || tag.attack===b)) oppDmg = 0;
-  });
-  oppSupportTags.forEach(tag=>{
-    if(tag.type==='boostOwnAttack') oppDmg += tag.amount;
-    if(tag.type==='boostOwnAttackSpecific' && tag.attack===b) oppDmg += tag.amount;
-    if(tag.type==='doubleOwnAttack' && tag.attack===b) oppDmg *= 2;
-    if(tag.type==='multiplyOwnAttack') oppDmg *= tag.mult;
-    if(tag.type==='zeroOppAttack' && (!tag.attack || tag.attack===a)) myDmg = 0;
-  });
+  // Final zeroes: a counter makes the matching attack miss, "O/T/X to 0" negation, Shogun's Order
+  let myNeg = false, oppNeg = false;
+  if(a==='x'){ const neg = parseNegateTag(myCard.xt);  if(neg && neg.toLowerCase()===b) oppNeg = true; }
+  if(b==='x'){ const neg = parseNegateTag(oppCard.xt); if(neg && neg.toLowerCase()===a) myNeg = true; }
+  const oppFinalZero = zeroBoth || myCountering || oppNeg;
+  const myFinalZero  = zeroBoth || oppCountering || myNeg;
+  const fin = v=>Math.max(0, Math.round(v));
+  const myDmgFor  = base=> myFinalZero  ? 0 : fin(applyAimedMods(oppT, a, applyOwnMods(myT,  a, base + bothBoost)));
+  const oppDmgFor = base=> oppFinalZero ? 0 : fin(applyOwnMods(oppT, b, applyAimedMods(myT, b, base + bothBoost)));
 
-  if(myCountering) oppDmg = 0; // their matching attack "misses"
-  if(oppCountering) myDmg = 0;
-  if(a==='x'){ const neg=parseNegateTag(myCard.xt); if(neg && neg.toLowerCase()===b) oppDmg=0; }
-  if(b==='x'){ const neg=parseNegateTag(oppCard.xt); if(neg && neg.toLowerCase()===a) myDmg=0; }
-
-  myDmg = Math.max(0, Math.round(myDmg));
-  oppDmg = Math.max(0, Math.round(oppDmg));
-
-  // First-strike: the turn player goes first by default. The non-turn player
-  // can steal that only if the turn player does NOT also have a "1st Attack"
-  // trait -- per the official text, having it yourself voids a foe's steal
-  // attempt even though it's otherwise redundant for whoever already goes first.
-  const iCanSteal = activeGrantsFirstStrike(myCard, a) || mySupportTags.some(t=>t.type==='firstStrike');
-  const oppCanSteal = activeGrantsFirstStrike(oppCard, b) || oppSupportTags.some(t=>t.type==='firstStrike');
+  // First-strike: the turn player goes first by default. The non-turn player can steal
+  // that only if the turn player does NOT also have a "1st Attack" trait -- per the
+  // official text, having it yourself voids a foe's steal attempt even though it's
+  // otherwise redundant for whoever already goes first.
+  const iCanSteal = activeGrantsFirstStrike(myCard, a) || myT.some(t=>t.type==='firstStrike');
+  const oppCanSteal = activeGrantsFirstStrike(oppCard, b) || oppT.some(t=>t.type==='firstStrike');
   let myGoesFirst;
   if(iAmTurnPlayer===undefined || iAmTurnPlayer===null){
     myGoesFirst = iCanSteal && !oppCanSteal ? true : (!iCanSteal && oppCanSteal ? false : null);
@@ -294,37 +513,43 @@ function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSuppo
     myGoesFirst = iAmTurnPlayer ? turnPlayerGoesFirst : !turnPlayerGoesFirst;
   }
 
-  if(myGoesFirst===true){
-    if(myDmg>=oppHp) oppDmg=0;
-  } else if(myGoesFirst===false){
-    if(oppDmg>=myHp) myDmg=0;
+  // 5. the exchange
+  const hp = {me:hpMe, opp:hpOpp};
+  let dealtMe = 0, dealtOpp = 0, lifeMe = 0, lifeOpp = 0, crashMe = null, crashOpp = null;
+  function afterStrike(att, dmg){
+    const me = att==='me';
+    if(me ? myEatUp : oppEatUp){ hp[att] += dmg; if(me) lifeMe += dmg; else lifeOpp += dmg; }
+    if(me ? myCrashing : oppCrashing){ hp[att] = 10; if(me) crashMe = 10; else crashOpp = 10; }
+    else if((me ? myHpTag : oppHpTag) && (me ? myHpTag : oppHpTag).thenHalve){ hp[att] = Math.floor(hp[att]/2); }
   }
+  function strike(att, hpAtStrike){
+    const me = att==='me';
+    const base = (me ? myHpBased : oppHpBased) ? hpAtStrike : (me ? baseMy : baseOpp);
+    let dmg = me ? myDmgFor(base) : oppDmgFor(base) + hiddenBuffer;
+    if(me){ hp.opp = Math.max(0, hp.opp - dmg); dealtMe = dmg; } else { hp.me = Math.max(0, hp.me - dmg); dealtOpp = dmg; }
+    afterStrike(att, dmg);
+  }
+  if(myGoesFirst===null){
+    // Order unknown: both strikes land from the same starting HP.
+    const sm = hp.me, so = hp.opp;
+    const dm = myDmgFor(myHpBased ? sm : baseMy), dop = oppDmgFor(oppHpBased ? so : baseOpp) + hiddenBuffer;
+    hp.opp = Math.max(0, so - dm); hp.me = Math.max(0, sm - dop); dealtMe = dm; dealtOpp = dop;
+    afterStrike('me', dm); afterStrike('opp', dop);
+  } else {
+    const order = myGoesFirst ? ['me','opp'] : ['opp','me'];
+    strike(order[0], hp[order[0]]);
+    if(hp[order[1]] > 0) strike(order[1], hp[order[1]]);
+  }
+  if(lifeMe) hpNotes.push(`you recovered ${lifeMe} HP (Eat-up HP)`);
+  if(lifeOpp) hpNotes.push(`opponent recovered ${lifeOpp} HP (Eat-up HP)`);
+  if(crashMe!=null) hpNotes.push(`your HP became ${crashMe} (Crash)`);
+  if(crashOpp!=null) hpNotes.push(`opponent's HP became ${crashOpp} (Crash)`);
 
-  if(hiddenBuffer) oppDmg += hiddenBuffer;
-
-  // HP-modifying effects (healing, halving, Crash's HP-to-10, Eat-up-HP
-  // lifesteal) -- these change actual HP totals, separate from the damage
-  // swing used for solver ranking. The resolver applies these to real HP.
-  let myHealAmt = 0, oppHealAmt = 0, myHalve = false, oppHalve = false;
-  let mySetHp = null, oppSetHp = null;
-  mySupportTags.forEach(tag=>{
-    if(tag.type==='healSelf') myHealAmt += tag.amount;
-    if(tag.type==='healOpp') oppHealAmt += tag.amount;
-    if(tag.type==='halveSelfHp') myHalve = true;
-    if(tag.type==='halveOppHp') oppHalve = true;
-  });
-  oppSupportTags.forEach(tag=>{
-    if(tag.type==='healSelf') oppHealAmt += tag.amount;
-    if(tag.type==='healOpp') myHealAmt += tag.amount;
-    if(tag.type==='halveSelfHp') oppHalve = true;
-    if(tag.type==='halveOppHp') myHalve = true;
-  });
-  if(a==='x' && isEatUpHpXTag(myCard.xt)) myHealAmt += myDmg;
-  if(b==='x' && isEatUpHpXTag(oppCard.xt)) oppHealAmt += oppDmg;
-  if(myCrashing) mySetHp = 10;
-  if(oppCrashing) oppSetHp = 10;
-
-  return { myDmg, oppDmg, koOpp: myDmg>=oppHp, koMe: oppDmg>=myHp, myHealAmt, oppHealAmt, myHalve, oppHalve, mySetHp, oppSetHp };
+  return {
+    myDmg:dealtMe, oppDmg:dealtOpp, koOpp:hp.opp<=0, koMe:hp.me<=0,
+    myHpBefore:myHp0, oppHpBefore:oppHp0, myHpAfter:hp.me, oppHpAfter:hp.opp,
+    myHealAmt:myHealAmt+lifeMe, oppHealAmt:oppHealAmt+lifeOpp, myHalve, oppHalve, mySetHp:crashMe, oppSetHp:crashOpp, hpNotes
+  };
 }
 
 function computeMatrix(myCard, oppCard, myHp, oppHp, mySupportTags, hiddenBuffer, iAmTurnPlayer){
@@ -335,30 +560,71 @@ function computeMatrix(myCard, oppCard, myHp, oppHp, mySupportTags, hiddenBuffer
   }); });
   return grid;
 }
+
+// ======================= KO-AWARE SCORING =======================
+// A match is won by causing 3 KOs, so a bout is scored on the HP swing it produces AND on
+// whether it KOs either Digimon. A KO is worth more the closer that side is to 3 (and
+// decisive at 2). The numbers are in "HP swing" units, on top of the HP the KO itself
+// removes: ~2000 means one KO is worth about a big Digimon's whole HP bar. These are the
+// knobs to tune after play-testing -- raise `base` to play safer, lower it to trade
+// KO risk for raw damage. The swing comes from the HP each side actually ends the bout
+// on, so damage past a Digimon's remaining HP isn't counted and heals / halving /
+// Crash's HP cost all are.
+const KO_STAKES = { base:2000, perKO:500, decisive:100000 };
+function koStakes(){
+  const s = (typeof B!=='undefined' && B) ? B : {};
+  const mine = Math.min(s.myScore||0, 2), theirs = Math.min(s.oppScore||0, 2);
+  return {
+    gain: mine>=2   ? KO_STAKES.decisive : KO_STAKES.base + KO_STAKES.perKO*mine,   // my KO wins the match at 2
+    loss: theirs>=2 ? KO_STAKES.decisive : KO_STAKES.base + KO_STAKES.perKO*theirs  // their KO wins it at 2
+  };
+}
+function cellSwing(cell){ return (cell.myHpAfter - cell.myHpBefore) - (cell.oppHpAfter - cell.oppHpBefore); }
+function cellScore(cell, st){
+  st = st || koStakes();
+  return cellSwing(cell) + (cell.koOpp ? st.gain : 0) - (cell.koMe ? st.loss : 0);
+}
+function worstCell(cells, st){
+  let w = null, ws = Infinity;
+  cells.forEach(c=>{ const s = cellScore(c, st); if(s<ws){ ws = s; w = c; } });
+  return {cell:w, score:ws};
+}
+function outcomeOf(cells, st){
+  const w = worstCell(cells, st);
+  return { worst:w.score, swing:cellSwing(w.cell), koMe:w.cell.koMe, koOpp:w.cell.koOpp };
+}
+
 function maximin(grid){
-  const atks=['o','t','x'];
-  let best=null, bestVal=-Infinity;
+  const atks=['o','t','x'], st = koStakes();
+  let best=null, bestVal=-Infinity, bestCell=null;
   atks.forEach(a=>{
-    let worst=Infinity;
-    atks.forEach(b=>{ const net = grid[a][b].myDmg - grid[a][b].oppDmg; if(net<worst) worst=net; });
-    if(worst>bestVal){ bestVal=worst; best=a; }
+    const w = worstCell(atks.map(b=>grid[a][b]), st);
+    if(w.score>bestVal){ bestVal = w.score; best = a; bestCell = w.cell; }
   });
-  return {best, bestVal};
+  return { best, bestVal, bestSwing:cellSwing(bestCell), bestKoMe:bestCell.koMe, bestKoOpp:bestCell.koOpp };
 }
 
 function rankSupportOptions(myCard, oppCard, myHp, oppHp, fixedA, hand, oppSupportTagsKnown, hiddenBuffer, iAmTurnPlayer){
+  const st = koStakes();
   const candidates = [{id:'', name:'— none —', tags:[]}].concat(
     hand.map(c=>({id:String(c._uid||c.id), name:c.name + (c.type==='option'?' (option)':''), tags:parseEffectTags(effectText(c), c)}))
   );
   return candidates.map(cand=>{
-    let worst = Infinity;
-    ['o','t','x'].forEach(b=>{
-      const cell = computeCell(myCard, oppCard, myHp, oppHp, fixedA, b, cand.tags, oppSupportTagsKnown||[], hiddenBuffer||0, iAmTurnPlayer);
-      const net = cell.myDmg - cell.oppDmg;
-      if(net<worst) worst = net;
-    });
-    return { id:cand.id, name:cand.name, worst };
+    const cells = ['o','t','x'].map(b=>computeCell(myCard, oppCard, myHp, oppHp, fixedA, b, cand.tags, oppSupportTagsKnown||[], hiddenBuffer||0, iAmTurnPlayer));
+    return Object.assign({ id:cand.id, name:cand.name, partial:!!(cand.tags.unmodelled||[]).length }, outcomeOf(cells, st));
   }).sort((x,y)=>y.worst-x.worst);
+}
+
+// Display helpers shared by the ranking lists: the HP swing of the worst case, plus a
+// tag when that worst case involves a KO either way.
+function fmtOutcome(swing, koMe, koOpp, approx){
+  let s = (approx?'~':'')+(swing>=0?'+':'')+swing;
+  if(koOpp) s += ' <span style="color:var(--nature)">KO</span>';
+  if(koMe) s += ' <span style="color:var(--red)">KO risk</span>';
+  return s;
+}
+function partialMark(partial){
+  return partial ? ' <span class="small-note" title="Part of this card\u2019s effect text isn\u2019t modeled by the solver yet, so its score may be off.">\u26A0 partly modeled</span>' : '';
 }
 
 function halveToNearestTen(val){ return Math.floor(val/20)*10; }
@@ -396,14 +662,16 @@ function effectQualityNote(card){
   const txt = effectText(card);
   const supTags = parseEffectTags(txt, card);
   supTags.forEach(t=>{
-    if(t.type==='zeroOppAttack'){ score+=100; notes.push('Support can zero an opponent attack outright.'); }
-    if(t.type==='doubleOwnAttack'){ score+=70; notes.push('Support can double one of its own attacks.'); }
-    if(t.type==='boostOwnAttack'){ score+=t.amount/5; notes.push(`Support boosts all attacks by +${t.amount}.`); }
-    if(t.type==='boostOwnAttackSpecific'){ score+=t.amount/8; notes.push(`Support boosts its ${(t.attack||'?').toUpperCase()} by +${t.amount}.`); }
-    if(t.type==='healSelf'){ score+=t.amount/6; notes.push(`Support heals +${t.amount} HP.`); }
-    if(t.type==='halveSelfHp'){ score-=80; notes.push('Support halves own HP — risky.'); }
-    if(t.type==='halveOppHp'){ score+=60; notes.push('Support halves opponent HP.'); }
-    if(t.type==='forceBothAttack'){ score+=20; notes.push(`Support forces both players onto ${(t.attack||'?').toUpperCase()} — situational.`); }
+    // A condition only sometimes holds, so a conditional effect counts for half.
+    const w = t.condition ? 0.5 : 1, cond = t.condition ? ' (conditional)' : '';
+    if(t.type==='zeroOppAttack'){ score+=100*w; notes.push('Support can zero an opponent attack outright'+cond+'.'); }
+    if(t.type==='doubleOwnAttack'){ score+=70*w; notes.push('Support can double one of its own attacks'+cond+'.'); }
+    if(t.type==='boostOwnAttack'){ score+=w*t.amount/5; notes.push(t.amount<0 ? `Support lowers all its attacks by ${-t.amount}${cond}.` : `Support boosts all attacks by +${t.amount}${cond}.`); }
+    if(t.type==='boostOwnAttackSpecific'){ score+=w*t.amount/8; notes.push(`Support boosts its ${(t.attack||'?').toUpperCase()} by +${t.amount}${cond}.`); }
+    if(t.type==='healSelf'){ score+=w*t.amount/6; notes.push(`Support heals +${t.amount} HP${cond}.`); }
+    if(t.type==='halveSelfHp'){ score-=80*w; notes.push('Support halves own HP — risky'+cond+'.'); }
+    if(t.type==='halveOppHp'){ score+=60*w; notes.push('Support halves opponent HP'+cond+'.'); }
+    if(t.type==='forceBothAttack'){ score+=20*w; notes.push(`Support forces both players onto ${(t.attack||'?').toUpperCase()} — situational${cond}.`); }
   });
   if(/draw \d* ?cards?/i.test(txt)){ score+=30; notes.push('Support draws a card — card advantage.'); }
   return {score, notes};
@@ -413,14 +681,14 @@ function rankEntranceCandidates(hand, oppActive, oppHp){
   const candidates = hand.filter(c=>c.type==='digimon').map(c=>adjustForEntrance(c));
   return candidates.map(card=>{
     const eff = effectQualityNote(card);
-    let matchupVal = null;
+    let matchupVal = null, mu = null;
     if(oppActive){
       const grid = computeMatrix(card, oppActive, card.hp, (oppHp!=null?oppHp:oppActive.hp), [], 0, true);
-      matchupVal = maximin(grid).bestVal;
+      mu = maximin(grid); matchupVal = mu.bestVal;
     }
     const avgAtk = Math.round((card.o+card.t+card.x)/3);
     const heuristic = Math.round(card.hp/10 + avgAtk/5 + eff.score);
-    return { card, matchupVal, heuristic, notes:eff.notes, avgAtk };
+    return { card, matchupVal, matchupSwing:mu&&mu.bestSwing, matchupKoMe:mu&&mu.bestKoMe, matchupKoOpp:mu&&mu.bestKoOpp, heuristic, notes:eff.notes, avgAtk };
   }).sort((a,b)=>{
     if(a.matchupVal!==null && b.matchupVal!==null) return b.matchupVal-a.matchupVal;
     return b.heuristic-a.heuristic;
@@ -428,6 +696,7 @@ function rankEntranceCandidates(hand, oppActive, oppHp){
 }
 
 function rankSupportOptionsOpenInfo(myCard, oppCard, myHp, oppHp, fixedA, myHand, oppHandCards, iAmTurnPlayer){
+  const st = koStakes();
   const myCandidates = [{id:'', name:'— none —', tags:[]}].concat(
     myHand.map(c=>({id:String(c._uid||c.id), name:c.name + (c.type==='option'?' (option)':''), tags:parseEffectTags(effectText(c), c)}))
   );
@@ -435,15 +704,13 @@ function rankSupportOptionsOpenInfo(myCard, oppCard, myHp, oppHp, fixedA, myHand
     (oppHandCards||[]).map(c=>parseEffectTags(effectText(c), c))
   );
   return myCandidates.map(cand=>{
-    let worst = Infinity;
+    const cells = [];
     ['o','t','x'].forEach(b=>{
       oppSupportCandidates.forEach(oppTags=>{
-        const cell = computeCell(myCard, oppCard, myHp, oppHp, fixedA, b, cand.tags, oppTags, 0, iAmTurnPlayer);
-        const net = cell.myDmg - cell.oppDmg;
-        if(net<worst) worst = net;
+        cells.push(computeCell(myCard, oppCard, myHp, oppHp, fixedA, b, cand.tags, oppTags, 0, iAmTurnPlayer));
       });
     });
-    return { id:cand.id, name:cand.name, worst };
+    return Object.assign({ id:cand.id, name:cand.name, partial:!!(cand.tags.unmodelled||[]).length }, outcomeOf(cells, st));
   }).sort((x,y)=>y.worst-x.worst);
 }
 
@@ -456,22 +723,22 @@ function rankSupportOptionsOpenInfo(myCard, oppCard, myHp, oppHp, fixedA, myHand
 function randomCardExpectedValue(myCard, oppCard, myHp, oppHp, fixedA, oppSupportSets, hiddenBuffer, iAmTurnPlayer){
   const remaining = getRemainingDeckList();
   if(!remaining.length) return null;
+  const st = koStakes();
   const sets = (oppSupportSets.length && Array.isArray(oppSupportSets[0])) ? oppSupportSets : [oppSupportSets||[]];
   const total = remaining.reduce((s,r)=>s+r.count, 0);
-  let weightedSum = 0;
+  let sumScore = 0, sumSwing = 0, koMeCount = 0;
   remaining.forEach(({card, count})=>{
     const tags = parseEffectTags(effectText(card), card);
-    let worst = Infinity;
+    const cells = [];
     ['o','t','x'].forEach(b=>{
       sets.forEach(oppTags=>{
-        const cell = computeCell(myCard, oppCard, myHp, oppHp, fixedA, b, tags, oppTags, hiddenBuffer||0, iAmTurnPlayer);
-        const net = cell.myDmg - cell.oppDmg;
-        if(net<worst) worst = net;
+        cells.push(computeCell(myCard, oppCard, myHp, oppHp, fixedA, b, tags, oppTags, hiddenBuffer||0, iAmTurnPlayer));
       });
     });
-    weightedSum += worst * count;
+    const o = outcomeOf(cells, st);
+    sumScore += o.worst * count; sumSwing += o.swing * count; if(o.koMe) koMeCount += count;
   });
-  return { ev: Math.round(weightedSum/total), poolSize: total };
+  return { ev: Math.round(sumScore/total), evSwing: Math.round(sumSwing/total), koMeShare: koMeCount/total, poolSize: total };
 }
 
 // ============================= DECK GENERATION =============================
@@ -868,7 +1135,7 @@ function renderEntrancePhase(el){
             <b>${r.card.name}</b>${r.card._entryPenalty?' ('+(r.card._entryPenalty==='quarter'?'1/4':'1/2')+' on entry)':''} — HP ${r.card.hp}, avg attack ${r.avgAtk}
             ${r.notes.length ? '<br><span class="small-note">'+r.notes.join(' ')+'</span>' : ''}
           </span>
-          <span class="val">${r.matchupVal!==null ? (r.matchupVal>=0?'+':'')+r.matchupVal+' worst-case' : 'score '+r.heuristic}</span>
+          <span class="val">${r.matchupVal!==null ? fmtOutcome(r.matchupSwing, r.matchupKoMe, r.matchupKoOpp)+' worst-case' : 'score '+r.heuristic}</span>
           <button class="btn small secondary" onclick="App.pickEntrance('${r.card._uid||r.card.id}')">USE THIS</button>
         </div>`).join('') : '<div class="small-note">No Digimon cards in hand to enter with.</div>'}
     ` : ''}
@@ -1089,7 +1356,7 @@ function renderAttackPhase(el){
       <div class="small-note">${iAmTurnPlayer?'It is your turn — you attack first by default, unless the opponent\u2019s card steals it.':'It is the opponent\u2019s turn — they attack first by default, unless your card steals it.'}</div>
       <div class="rec">
         <div class="headline">Recommended: ${labels[rec.best]}</div>
-        <div class="reason">Worst-case net HP swing assuming they play optimally: <b>${rec.bestVal>=0?'+':''}${rec.bestVal}</b>.</div>
+        <div class="reason">Worst-case net HP swing assuming they play optimally: <b>${fmtOutcome(rec.bestSwing, rec.bestKoMe, rec.bestKoOpp)}</b>. KOs count extra, more the closer either side is to 3.</div>
       </div>
       ${matrixHtml}
       <label style="margin-top:14px">LOCK IN YOUR ATTACK</label>
@@ -1126,9 +1393,9 @@ function renderAttackPhase(el){
     const redirectTag = oppTags.find(t=>t.type==='redirectOtherAttackValue');
     const redirectWarning = redirectTag ? `<div class="warn-box">${B.oppSupportRevealed.name} redirects your locked ${B.myLockedAtk.toUpperCase()} to use <b>${redirectTag.map[B.myLockedAtk].toUpperCase()}'s damage number</b> instead. Any support you pick that boosts/doubles "${B.myLockedAtk.toUpperCase()}" still applies — it checks which button you pressed, not which number came out — so it's scored against the redirected value below, not wasted.</div>` : '';
     const randomEv = getSelectedDeck() ? randomCardExpectedValue(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppTags, 0, iAmTurnPlayer) : null;
-    const combined = ranked.map(r=>({id:r.id, name:r.name, val:r.worst, note:null}));
+    const combined = ranked.map(r=>({id:r.id, name:r.name, val:r.worst, swing:r.swing, koMe:r.koMe, koOpp:r.koOpp, partial:r.partial, note:null}));
     if(randomEv){
-      combined.push({id:'__random__', name:'Play a random card from my deck', val:randomEv.ev, note:`Expected value across the ${randomEv.poolSize} cards still unaccounted for in your tracked deck.`, approx:true});
+      combined.push({id:'__random__', name:'Play a random card from my deck', val:randomEv.ev, swing:randomEv.evSwing, note:`Expected value across the ${randomEv.poolSize} cards still unaccounted for in your tracked deck.${randomEv.koMeShare>0 ? ' In '+Math.round(randomEv.koMeShare*100)+'% of those draws the worst case gets you KO\u2019d.' : ''}`, approx:true});
     } else {
       combined.push({id:'__random__', name:'Play a random card from my deck', val:null, note:"Unknown effect — can't be scored (select a deck to get a real estimate here)."});
     }
@@ -1139,8 +1406,8 @@ function renderAttackPhase(el){
       ${redirectWarning}
       ${combined.map((r,i)=>`
         <div class="suggestion-rank ${i===0?'top':''}">
-          <span>${r.name}${r.note?'<br><span class="small-note">'+r.note+'</span>':''}</span>
-          ${r.val!=null ? `<span class="val">${r.approx?'~':''}${r.val>=0?'+':''}${r.val}</span>` : ''}
+          <span>${r.name}${partialMark(r.partial)}${r.note?'<br><span class="small-note">'+r.note+'</span>':''}</span>
+          ${r.val!=null ? `<span class="val">${fmtOutcome(r.swing, r.koMe, r.koOpp, r.approx)}</span>` : ''}
           <button class="btn small secondary" onclick="App.pickMySupport('${r.id}')">USE</button>
         </div>`).join('')}
     `;
@@ -1151,9 +1418,9 @@ function renderAttackPhase(el){
     const ranked = rankSupportOptionsOpenInfo(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, B.myHand, B.oppHand, iAmTurnPlayer);
     const oppPossibleSets = [[]].concat(B.oppHand.map(c=>parseEffectTags(effectText(c), c)));
     const randomEv = getSelectedDeck() ? randomCardExpectedValue(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppPossibleSets, 0, iAmTurnPlayer) : null;
-    const combined = ranked.map(r=>({id:r.id, name:r.name, val:r.worst, note:null}));
+    const combined = ranked.map(r=>({id:r.id, name:r.name, val:r.worst, swing:r.swing, koMe:r.koMe, koOpp:r.koOpp, partial:r.partial, note:null}));
     if(randomEv){
-      combined.push({id:'__random__', name:'Play a random card from my deck', val:randomEv.ev, note:`Expected value across the ${randomEv.poolSize} cards still unaccounted for in your tracked deck.`, approx:true});
+      combined.push({id:'__random__', name:'Play a random card from my deck', val:randomEv.ev, swing:randomEv.evSwing, note:`Expected value across the ${randomEv.poolSize} cards still unaccounted for in your tracked deck.${randomEv.koMeShare>0 ? ' In '+Math.round(randomEv.koMeShare*100)+'% of those draws the worst case gets you KO\u2019d.' : ''}`, approx:true});
     } else {
       combined.push({id:'__random__', name:'Play a random card from my deck', val:null, note:"Unknown effect — can't be scored (select a deck to get a real estimate here)."});
     }
@@ -1164,8 +1431,8 @@ function renderAttackPhase(el){
       <div id="rankedSupportList">
         ${combined.map((r,i)=>`
           <div class="suggestion-rank ${i===0?'top':''}">
-            <span>${r.name}${r.note?'<br><span class="small-note">'+r.note+'</span>':''}</span>
-            ${r.val!=null ? `<span class="val">${r.approx?'~':''}${r.val>=0?'+':''}${r.val}</span>` : ''}
+            <span>${r.name}${partialMark(r.partial)}${r.note?'<br><span class="small-note">'+r.note+'</span>':''}</span>
+            ${r.val!=null ? `<span class="val">${fmtOutcome(r.swing, r.koMe, r.koOpp, r.approx)}</span>` : ''}
             <button class="btn small secondary" onclick="App.pickMySupport('${r.id}')">USE</button>
           </div>`).join('')}
       </div>
@@ -1456,45 +1723,30 @@ const App = {
     let unknownNote = '';
     if(oppAtk==='__unknown__'){
       const options = ['o','t','x'].map(b=>computeCell(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, b, mySupportTags, oppSupportTags, 0, iAmTurnPlayer));
-      const allSame = options.every(c=>c.myDmg===options[0].myDmg && c.oppDmg===options[0].oppDmg);
+      const allSame = options.every(c=>c.myDmg===options[0].myDmg && c.oppDmg===options[0].oppDmg && c.myHpAfter===options[0].myHpAfter && c.oppHpAfter===options[0].oppHpAfter);
       if(allSame){
         oppAtk = 'o'; // doesn't matter which -- outcome is identical either way, confirmed below
         unknownNote = ' (outcome was the same regardless of their attack, since they never got to act)';
       } else {
         // Not actually invariant -- don't guess in their favor. Assume the worst case for the player.
         let worstIdx = 0, worstNet = Infinity;
-        options.forEach((c,i)=>{ const net = c.myDmg - c.oppDmg; if(net<worstNet){ worstNet=net; worstIdx=i; } });
+        options.forEach((c,i)=>{ const net = cellScore(c); if(net<worstNet){ worstNet=net; worstIdx=i; } });
         oppAtk = ['o','t','x'][worstIdx];
         unknownNote = ' (their actual attack was unknown and the outcome WOULD have differed by choice -- assumed their worst-case attack against you as a conservative estimate; correct this manually if you later find out what they had queued)';
       }
     }
 
     const cell = computeCell(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppAtk, mySupportTags, oppSupportTags, 0, iAmTurnPlayer);
-    B.oppHp = Math.max(0, B.oppHp - cell.myDmg);
-    B.myHp = Math.max(0, B.myHp - cell.oppDmg);
-    // HP-modifying effects (heals are typically confirmed permanent; applied after the damage exchange).
-    if(cell.myHalve) B.myHp = Math.floor(B.myHp/2);
-    if(cell.oppHalve) B.oppHp = Math.floor(B.oppHp/2);
-    if(cell.myHealAmt) B.myHp += cell.myHealAmt;
-    if(cell.oppHealAmt) B.oppHp += cell.oppHealAmt;
-    // Crash: HP is set to exactly 10 as the cost of the attack -- overrides everything else above.
-    if(cell.mySetHp!=null) B.myHp = cell.mySetHp;
-    if(cell.oppSetHp!=null) B.oppHp = cell.oppSetHp;
+    // computeCell resolves the whole bout (support HP effects first, then the strikes in
+    // order), so real HP comes straight from it -- the same numbers the solver ranked on,
+    // so what's applied here can't drift away from what was recommended.
+    B.myHp = cell.myHpAfter;
+    B.oppHp = cell.oppHpAfter;
     if(mySupportCard) removeFromHand(mySupportCard._uid||mySupportCard.id);
 
     const mySupportLabel = mySupportCard ? ' + '+mySupportCard.name : (myRandomReveal ? ' + random card (revealed: '+myRandomReveal.name+')' : (B.mySupportChoiceId==='__random__' ? ' + random card (unknown effect)' : ''));
     const oppSupportLabel = B.oppSupportRevealed ? ' + '+(oppRandomReveal ? 'random card (revealed: '+oppRandomReveal.name+')' : B.oppSupportRevealed.name+(oppWasRandom?' (unknown effect)':'')) : '';
-    let hpEffectNote = '';
-    if(cell.myHealAmt || cell.oppHealAmt || cell.myHalve || cell.oppHalve || cell.mySetHp!=null || cell.oppSetHp!=null){
-      const parts = [];
-      if(cell.myHealAmt) parts.push(`you recovered ${cell.myHealAmt} HP`);
-      if(cell.oppHealAmt) parts.push(`opponent recovered ${cell.oppHealAmt} HP`);
-      if(cell.myHalve) parts.push(`your HP was halved`);
-      if(cell.oppHalve) parts.push(`opponent's HP was halved`);
-      if(cell.mySetHp!=null) parts.push(`your HP became ${cell.mySetHp} (Crash)`);
-      if(cell.oppSetHp!=null) parts.push(`opponent's HP became ${cell.oppSetHp} (Crash)`);
-      hpEffectNote = ' ('+parts.join(', ')+', applied and permanent)';
-    }
+    const hpEffectNote = cell.hpNotes.length ? ' ('+cell.hpNotes.join(', ')+', applied and permanent)' : '';
     logEvent(`You: ${attackLabel(B.myLockedAtk, true)} (${cell.myDmg} dmg)${mySupportLabel} vs Opponent: ${attackLabel(oppAtk, false)} (${cell.oppDmg} dmg)${oppSupportLabel}${unknownNote}${hpEffectNote}. HP now You ${B.myHp} / Opp ${B.oppHp}.`);
     if((B.mySupportChoiceId==='__random__' && !myRandomReveal) || (oppWasRandom && !oppRandomReveal)){
       logEvent(`Note: a random/unknown card's identity is still unconfirmed — its effect wasn't modeled, so the damage above may not reflect what actually happened in-game.`);
