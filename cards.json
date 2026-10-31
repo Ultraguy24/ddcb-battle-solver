@@ -3073,19 +3073,19 @@
     "id": 222,
     "type": "option",
     "name": "Mega Def. Disk Circle",
-    "effect": "Opponent's Circle attack goes to 0. Recover own HP by 100."
+    "effect": "Opponent's Circle Attack Power goes to 0. Recover own HP by +100."
   },
   {
     "id": 223,
     "type": "option",
     "name": "Mega Def. Disk Triangle",
-    "effect": "Opponent's Triangle attack goes to 0. Recover own HP."
+    "effect": "Opponent's Triangle Attack Power goes to 0. Recover own HP by +100."
   },
   {
     "id": 224,
     "type": "option",
     "name": "Mega Def. Disk X",
-    "effect": "Opponent's X attack goes to 0. Recover own HP."
+    "effect": "Opponent's X Attack Power goes to 0. Recover own HP by +100."
   },
   {
     "id": 225,
@@ -3481,7 +3481,7 @@
     "id": 290,
     "type": "option",
     "name": "Speed Sevens",
-    "effect": "Attack first. Own attack becomes 'eat up HP', boost attack power +200."
+    "effect": "Attack first. Own attack becomes \"Eat-up HP.\" Boost Attack Power +200"
   },
   {
     "id": 291,
