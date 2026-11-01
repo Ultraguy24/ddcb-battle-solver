@@ -236,11 +236,9 @@ const EFFECT_RULES = [
   [rx(String.raw`own attack (?:becomes|is) ['"]?\s*eat[ -]?up(?: HP)?[.'"]*`), ()=>[{type:'lockOwnAttack', attack:'x'}, {type:'eatUpHp'}]],
   [rx(String.raw`own attack becomes {A}`),                           m=>[{type:'lockOwnAttack', attack:wordToAtk(m[1])}]],
   [rx(String.raw`\buse {A} and\b`),                                  m=>[{type:'lockOwnAttack', attack:wordToAtk(m[1])}]],
-  [rx(String.raw`{A} and {A} attack power (?:are|is|becomes?) 0`),   m=>{
-    const mentioned = [wordToAtk(m[1]), wordToAtk(m[2])];
-    const locked = ['o','t','x'].find(k=>!mentioned.includes(k));
-    return locked ? [{type:'lockOwnAttack', attack:locked}] : [];
-  }],
+  // "O and T attack power are 0" zeroes those attacks for whoever plays it. It does NOT switch you to the
+  // third attack: support is chosen after the attack, so a locked-in Circle just deals 0 (seen in play with Tsukaimon).
+  [rx(String.raw`{A} and {A} attack power (?:are|is|becomes?) 0`),   m=>[{type:'zeroOwnAttack', attack:wordToAtk(m[1])}, {type:'zeroOwnAttack', attack:wordToAtk(m[2])}]],
   // ---- turn order
   [rx(String.raw`attack first`),                                     ()=>[{type:'firstStrike'}]],
   // ---- both players' attack numbers
@@ -354,6 +352,7 @@ function applyOwnMods(tags, atk, v){
       case 'doubleOwnAttack': if(t.attack===atk) v *= 2; break;
       case 'multiplyOwnAttack': if(!t.attack || t.attack===atk) v *= t.mult; break;
       case 'setOwnAttack': v = t.value; break;
+      case 'zeroOwnAttack': if(t.attack===atk) v = 0; break;
     }
   });
   return v;
@@ -546,7 +545,8 @@ function computeCell(myCard, oppCard, myHp, oppHp, a, b, mySupportTags, oppSuppo
   if(crashOpp!=null) hpNotes.push(`opponent's HP became ${crashOpp} (Crash)`);
 
   return {
-    myDmg:dealtMe, oppDmg:dealtOpp, koOpp:hp.opp<=0, koMe:hp.me<=0,
+    myDmg:dealtMe, oppDmg:dealtOpp, koOpp:hp.opp<=0, koMe:hp.me<=0, myAtk:a, oppAtk:b,
+    myTagsUsed:myT.map(t=>t.type), oppTagsUsed:oppT.map(t=>t.type),
     myHpBefore:myHp0, oppHpBefore:oppHp0, myHpAfter:hp.me, oppHpAfter:hp.opp,
     myHealAmt:myHealAmt+lifeMe, oppHealAmt:oppHealAmt+lifeOpp, myHalve, oppHalve, mySetHp:crashMe, oppSetHp:crashOpp, hpNotes
   };
@@ -584,35 +584,44 @@ function cellScore(cell, st){
   st = st || koStakes();
   return cellSwing(cell) + (cell.koOpp ? st.gain : 0) - (cell.koMe ? st.loss : 0);
 }
-function worstCell(cells, st){
-  let w = null, ws = Infinity;
-  cells.forEach(c=>{ const s = cellScore(c, st); if(s<ws){ ws = s; w = c; } });
-  return {cell:w, score:ws};
-}
-function outcomeOf(cells, st){
-  const w = worstCell(cells, st);
-  return { worst:w.score, swing:cellSwing(w.cell), koMe:w.cell.koMe, koOpp:w.cell.koOpp };
+// When two options have the same worst case, the one that does better across the opponent's
+// possible replies wins. The CPU doesn't look random (some of its picks look calculated), but
+// until the exported logs show a pattern every attack is treated as equally likely, and only for
+// this tie-break -- the worst case still decides first. Set a weight to 0 for an attack the CPU
+// never picks.
+const OPP_ATTACK_WEIGHTS = {o:1, t:1, x:1};
+// cells: every outcome the opponent can steer towards for ONE option of mine; ws: how likely each is.
+function outcomeOf(cells, st, ws){
+  let w = null, worst = Infinity, sum = 0, tot = 0;
+  cells.forEach((c,i)=>{
+    const sc = cellScore(c, st), wt = ws ? ws[i] : 1;
+    if(sc<worst){ worst = sc; w = c; }
+    sum += sc*wt; tot += wt;
+  });
+  const mean = tot ? sum/tot : worst;
+  // scores are whole numbers, so the tie-break term can never outweigh a real difference
+  return { worst, mean, key:worst + mean*1e-6, swing:cellSwing(w), koMe:w.koMe, koOpp:w.koOpp };
 }
 
 function maximin(grid){
-  const atks=['o','t','x'], st = koStakes();
-  let best=null, bestVal=-Infinity, bestCell=null;
+  const atks=['o','t','x'], st = koStakes(), ws = atks.map(b=>OPP_ATTACK_WEIGHTS[b]);
+  let best=null, bestKey=-Infinity, bestO=null;
   atks.forEach(a=>{
-    const w = worstCell(atks.map(b=>grid[a][b]), st);
-    if(w.score>bestVal){ bestVal = w.score; best = a; bestCell = w.cell; }
+    const o = outcomeOf(atks.map(b=>grid[a][b]), st, ws);
+    if(o.key>bestKey){ bestKey = o.key; best = a; bestO = o; }
   });
-  return { best, bestVal, bestSwing:cellSwing(bestCell), bestKoMe:bestCell.koMe, bestKoOpp:bestCell.koOpp };
+  return { best, bestVal:bestO.worst, bestMean:bestO.mean, bestKey, bestSwing:bestO.swing, bestKoMe:bestO.koMe, bestKoOpp:bestO.koOpp };
 }
 
 function rankSupportOptions(myCard, oppCard, myHp, oppHp, fixedA, hand, oppSupportTagsKnown, hiddenBuffer, iAmTurnPlayer){
-  const st = koStakes();
+  const st = koStakes(), ws = ['o','t','x'].map(b=>OPP_ATTACK_WEIGHTS[b]);
   const candidates = [{id:'', name:'— none —', tags:[]}].concat(
     hand.map(c=>({id:String(c._uid||c.id), name:c.name + (c.type==='option'?' (option)':''), tags:parseEffectTags(effectText(c), c)}))
   );
   return candidates.map(cand=>{
     const cells = ['o','t','x'].map(b=>computeCell(myCard, oppCard, myHp, oppHp, fixedA, b, cand.tags, oppSupportTagsKnown||[], hiddenBuffer||0, iAmTurnPlayer));
-    return Object.assign({ id:cand.id, name:cand.name, partial:!!(cand.tags.unmodelled||[]).length }, outcomeOf(cells, st));
-  }).sort((x,y)=>y.worst-x.worst);
+    return Object.assign({ id:cand.id, name:cand.name, partial:!!(cand.tags.unmodelled||[]).length }, outcomeOf(cells, st, ws));
+  }).sort((x,y)=>y.key-x.key);
 }
 
 // Display helpers shared by the ranking lists: the HP swing of the worst case, plus a
@@ -671,26 +680,97 @@ function effectQualityNote(card){
     if(t.type==='healSelf'){ score+=w*t.amount/6; notes.push(`Support heals +${t.amount} HP${cond}.`); }
     if(t.type==='halveSelfHp'){ score-=80*w; notes.push('Support halves own HP — risky'+cond+'.'); }
     if(t.type==='halveOppHp'){ score+=60*w; notes.push('Support halves opponent HP'+cond+'.'); }
+    if(t.type==='zeroOwnAttack'){ score-=30*w; notes.push(`Support zeroes its own ${(t.attack||'?').toUpperCase()} attack${cond}.`); }
     if(t.type==='forceBothAttack'){ score+=20*w; notes.push(`Support forces both players onto ${(t.attack||'?').toUpperCase()} — situational${cond}.`); }
   });
   if(/draw \d* ?cards?/i.test(txt)){ score+=30; notes.push('Support draws a card — card advantage.'); }
   return {score, notes};
 }
 
-function rankEntranceCandidates(hand, oppActive, oppHp){
+// ======================= DIGIVOLVE PATHS, ENTRANCE AND DP ADVICE =======================
+// Digivolving swaps your HP for the new form's FULL HP and restores its full stats (manual p.16),
+// so a Digimon with a route up has a built-in refill to fall back on. These helpers put a number
+// on that route so entrance, sacrifice and digivolve advice can all see it. Units are the same
+// "heuristic points" as the rest of the entrance score (10 HP or 5 attack power = 1 point).
+function avgAtkOf(c){ return Math.round(((c.o||0)+(c.t||0)+(c.x||0))/3); }
+// How much a path is trusted: ready now, covered by a Speed-Digivolve, one more sacrifice away, or further off.
+const PATH_RELIABILITY = { now:1, speed:1, near:0.6, far:0.4 };
+// With a real matchup the entrance score is in HP-swing units, so one path point is worth this much swing.
+const PATH_SWING = 5;
+function digivolvePath(card, hand, dp){
+  const none = {value:0, target:null, reach:'none', gap:0};
+  const order = {R:0,C:1,U:2};
+  if(!card || !(card.lvl in order) || card.lvl==='U') return none;
+  const speed = hasSpeedDigivolveCard(hand);
+  let best = none;
+  hand.forEach(c=>{
+    if(c.type!=='digimon' || c.sp!==card.sp || !(c.lvl in order) || order[c.lvl]!==order[card.lvl]+1) return;
+    const gap = Math.max(0, (c.dp||0) - (dp||0));
+    const reach = gap===0 ? 'now' : (speed ? 'speed' : 'later');
+    const rel = reach==='later' ? (gap<=20 ? PATH_RELIABILITY.near : PATH_RELIABILITY.far) : 1;
+    const value = Math.round(rel * (c.hp/10 + Math.max(0, avgAtkOf(c)-avgAtkOf(card))/5));
+    if(value>best.value) best = {value, target:c, reach, gap};
+  });
+  return best;
+}
+function pathNote(path){
+  const how = path.reach==='now' ? 'you already have the DP' : (path.reach==='speed' ? 'Speed-Digivolve covers the DP' : `needs ${path.gap} more DP`);
+  return `Route up: ${path.target.name} (${how}) — digivolving refills you to ${path.target.hp} HP with full stats.`;
+}
+
+// ---- sacrifice advisor tuning. A sacrificed card is replaced by a draw (your hand refills to 4, and
+// the CPU sacrifices nearly every turn), so what it costs is only how much better it is than a typical
+// replacement -- not its whole value.
+const SAC = { costWeight:0.6, fallbackBaseline:130 };
+function cardValue(c){ return Math.round(c.hp/10 + avgAtkOf(c)/5 + effectQualityNote(c).score); }
+function replacementBaseline(){
+  const rem = getRemainingDeckList().filter(r=>r.card.type==='digimon');
+  if(!rem.length) return SAC.fallbackBaseline;
+  let sum = 0, n = 0;
+  rem.forEach(r=>{ sum += cardValue(r.card)*r.count; n += r.count; });
+  return Math.round(sum/n);
+}
+
+// ---- digivolve timing. You only get a DP phase every other bout, and the opponent strikes in both bouts
+// before your next one, so the question is whether they can KO you inside that window.
+function threatOf(oppActive, myActive){
+  if(!oppActive || !myActive) return 0;
+  return Math.max.apply(null, ['o','t','x'].map(a=>effectiveDamage(oppActive, a, myActive, a)));
+}
+function digivolveAdvice(active, hp, oppActive, target){
+  if(!oppActive) return { now:null, text:"Their Digimon isn't known yet, so there's nothing to weigh against. Digivolving refills you to the new form's full HP, which is worth the most when you're low." };
+  const threat = threatOf(oppActive, active), refill = target ? ` ${target.name} would refill you to ${target.hp}.` : '';
+  if(hp<=threat)   return { now:true,  threat, text:`Their strongest attack (${threat}) can KO you from ${hp} HP — digivolve now.${refill}` };
+  if(hp<=2*threat) return { now:true,  threat, text:`Two of their hits (${threat} each) would KO you from ${hp} HP before your next DP phase — digivolving now is the safe play.${refill}` };
+  return { now:false, threat, text:`You can take two of their hits (${threat} each) from ${hp} HP before your next DP phase — holding keeps the refill for when you're low.${refill}` };
+}
+function adviceHtml(adv, holdLabel){
+  if(!adv) return '';
+  const head = adv.now===null ? '' : (adv.now ? 'Recommended: <b>digivolve now</b>. ' : 'Recommended: <b>'+(holdLabel||'hold')+'</b>. ');
+  return `<div class="reason">${head}${adv.text}</div>`;
+}
+
+function rankEntranceCandidates(hand, oppActive, oppHp, dp){
+  if(dp==null) dp = (typeof B!=='undefined' && B) ? (B.myDpTotal||0) : 0;
   const candidates = hand.filter(c=>c.type==='digimon').map(c=>adjustForEntrance(c));
   return candidates.map(card=>{
+    const uid = String(card._uid||card.id);
+    const rest = hand.filter(c=>String(c._uid||c.id)!==uid);
+    const path = digivolvePath(card, rest, dp);
     const eff = effectQualityNote(card);
-    let matchupVal = null, mu = null;
+    let matchupVal = null, matchupKey = null, mu = null;
     if(oppActive){
       const grid = computeMatrix(card, oppActive, card.hp, (oppHp!=null?oppHp:oppActive.hp), [], 0, true);
-      mu = maximin(grid); matchupVal = mu.bestVal;
+      mu = maximin(grid); matchupVal = mu.bestVal; matchupKey = mu.bestKey + path.value*PATH_SWING;
     }
-    const avgAtk = Math.round((card.o+card.t+card.x)/3);
-    const heuristic = Math.round(card.hp/10 + avgAtk/5 + eff.score);
-    return { card, matchupVal, matchupSwing:mu&&mu.bestSwing, matchupKoMe:mu&&mu.bestKoMe, matchupKoOpp:mu&&mu.bestKoOpp, heuristic, notes:eff.notes, avgAtk };
+    const avgAtk = avgAtkOf(card);
+    const heuristic = Math.round(card.hp/10 + avgAtk/5 + eff.score + path.value);
+    const notes = eff.notes.slice();
+    if(path.target) notes.unshift(pathNote(path));
+    return { card, matchupVal, matchupKey, matchupSwing:mu&&mu.bestSwing, matchupKoMe:mu&&mu.bestKoMe, matchupKoOpp:mu&&mu.bestKoOpp,
+             heuristic, notes, avgAtk, path:{value:path.value, target:path.target?path.target.name:null, reach:path.reach, gap:path.gap} };
   }).sort((a,b)=>{
-    if(a.matchupVal!==null && b.matchupVal!==null) return b.matchupVal-a.matchupVal;
+    if(a.matchupKey!==null && b.matchupKey!==null) return b.matchupKey-a.matchupKey;
     return b.heuristic-a.heuristic;
   });
 }
@@ -704,14 +784,15 @@ function rankSupportOptionsOpenInfo(myCard, oppCard, myHp, oppHp, fixedA, myHand
     (oppHandCards||[]).map(c=>parseEffectTags(effectText(c), c))
   );
   return myCandidates.map(cand=>{
-    const cells = [];
+    const cells = [], wts = [];
     ['o','t','x'].forEach(b=>{
       oppSupportCandidates.forEach(oppTags=>{
         cells.push(computeCell(myCard, oppCard, myHp, oppHp, fixedA, b, cand.tags, oppTags, 0, iAmTurnPlayer));
+        wts.push(OPP_ATTACK_WEIGHTS[b] / oppSupportCandidates.length);
       });
     });
-    return Object.assign({ id:cand.id, name:cand.name, partial:!!(cand.tags.unmodelled||[]).length }, outcomeOf(cells, st));
-  }).sort((x,y)=>y.worst-x.worst);
+    return Object.assign({ id:cand.id, name:cand.name, partial:!!(cand.tags.unmodelled||[]).length }, outcomeOf(cells, st, wts));
+  }).sort((x,y)=>y.key-x.key);
 }
 
 // Expected value of playing a random card from what's actually left in your
@@ -726,19 +807,21 @@ function randomCardExpectedValue(myCard, oppCard, myHp, oppHp, fixedA, oppSuppor
   const st = koStakes();
   const sets = (oppSupportSets.length && Array.isArray(oppSupportSets[0])) ? oppSupportSets : [oppSupportSets||[]];
   const total = remaining.reduce((s,r)=>s+r.count, 0);
-  let sumScore = 0, sumSwing = 0, koMeCount = 0;
+  let sumScore = 0, sumSwing = 0, sumMean = 0, koMeCount = 0;
   remaining.forEach(({card, count})=>{
     const tags = parseEffectTags(effectText(card), card);
-    const cells = [];
+    const cells = [], wts = [];
     ['o','t','x'].forEach(b=>{
       sets.forEach(oppTags=>{
         cells.push(computeCell(myCard, oppCard, myHp, oppHp, fixedA, b, tags, oppTags, hiddenBuffer||0, iAmTurnPlayer));
+        wts.push(OPP_ATTACK_WEIGHTS[b] / sets.length);
       });
     });
-    const o = outcomeOf(cells, st);
-    sumScore += o.worst * count; sumSwing += o.swing * count; if(o.koMe) koMeCount += count;
+    const o = outcomeOf(cells, st, wts);
+    sumScore += o.worst * count; sumSwing += o.swing * count; sumMean += o.mean * count; if(o.koMe) koMeCount += count;
   });
-  return { ev: Math.round(sumScore/total), evSwing: Math.round(sumSwing/total), koMeShare: koMeCount/total, poolSize: total };
+  const ev = sumScore/total, evMean = sumMean/total;
+  return { ev: Math.round(ev), evMean: Math.round(evMean), key: ev + evMean*1e-6, evSwing: Math.round(sumSwing/total), koMeShare: koMeCount/total, poolSize: total };
 }
 
 // ============================= DECK GENERATION =============================
@@ -758,6 +841,8 @@ function scoreOptionForDeck(card){
   return eff.score;
 }
 
+// A deck can hold at most four copies of any one card, however many you own (manual p.21).
+const MAX_DECK_COPIES = 4;
 function generateOptimalDeck(collection, targetSize){
   targetSize = targetSize || 30;
   const owned = Object.keys(collection).filter(id=>collection[id]>0)
@@ -781,7 +866,7 @@ function generateOptimalDeck(collection, targetSize){
   function addUpTo(card, maxCopies){
     const already = deck[card.id]||0;
     const owned_ = collection[card.id]||0;
-    const canAdd = Math.min(owned_-already, maxCopies-already, targetSize-total);
+    const canAdd = Math.min(owned_-already, maxCopies-already, MAX_DECK_COPIES-already, targetSize-total);
     if(canAdd>0){ deck[card.id] = already+canAdd; total += canAdd; }
   }
 
@@ -855,9 +940,69 @@ const B = {
   selectedDeckId:null, // null | 0 | 1 | 2 -- which of your 3 decks you're using this match
   deckUsedThisMatch:{}, // {cardId: count} -- cards drawn from deck into hand so far this match
   log:[],
+  events:[], // the same story as data -- see logData()
 };
 
-function logEvent(text){ B.log.unshift({round:B.round, text}); renderLog(); }
+// ======================= STRUCTURED LOG + EXPORT =======================
+// B.log is the readable text log. B.events is the same story as data: every input, every solver
+// recommendation next to what you actually did, and the full state at that moment, so one exported
+// file is enough to replay or debug a match. Cards are {id, name}, so exact stats come from cards.json.
+const LOG_VERSION = 1;
+function cardBrief(c){
+  if(!c) return null;
+  if(c.type==='option') return {id:c.id, name:c.name, type:'option', effect:c.effect};
+  return {id:c.id, name:c.name, lvl:c.lvl, sp:c.sp, hp:c.hp, o:c.o, t:c.t, x:c.x, xt:c.xt, note:c.note, dp:c.dp, pp:c.pp, entryPenalty:c._entryPenalty||null};
+}
+function handBrief(h){ return (h||[]).map(c=>({id:c.id, name:c.name})); }
+function tagsBrief(tags){
+  return (tags||[]).map(t=>{
+    const o = {type:t.type};
+    ['attack','amount','value','mult','spec'].forEach(k=>{ if(t[k]!=null) o[k] = t[k]; });
+    if(t.condition) o.if = t.condition.kind || t.condition;
+    return o;
+  });
+}
+function gridBrief(grid){
+  const out = {};
+  ['o','t','x'].forEach(a=>{ out[a] = {}; ['o','t','x'].forEach(b=>{ const c = grid[a][b]; out[a][b] = {dealt:c.myDmg, took:c.oppDmg, koOpp:c.koOpp, koMe:c.koMe}; }); });
+  return out;
+}
+function deckLeftMap(){
+  const list = getRemainingDeckList();
+  if(!list.length) return null;
+  const m = {};
+  list.forEach(r=>{ m[r.card.name] = (m[r.card.name]||0) + r.count; });
+  return m;
+}
+function stateSnapshot(){
+  const deck = getSelectedDeck();
+  return {
+    round:B.round, phase:B.phase, step:B.phase==='dp' ? B.dpStep : (B.phase==='attack' ? B.atkStep : null), turnPlayer:B.turnPlayer,
+    score:{me:B.myScore, opp:B.oppScore},
+    me:{active:cardBrief(B.myActive), hp:B.myHp, dp:B.myDpTotal, hand:handBrief(B.myHand)},
+    opp:{active:cardBrief(B.oppActive), hp:B.oppHp, dp:B.oppDpTotal, hand:handBrief(B.oppHand)},
+    deck: deck ? {name:deck.name, left:deckLeftMap()} : null
+  };
+}
+function logData(type, data){
+  B.events.push({n:B.events.length+1, t:new Date().toISOString(), type, data:data||{}, state:stateSnapshot()});
+}
+function buildLogExport(){
+  const deck = getSelectedDeck();
+  return {
+    app:'ddcb-battle-solver', logVersion:LOG_VERSION, exportedAt:new Date().toISOString(),
+    solverSettings:{ KO_STAKES, OPP_ATTACK_WEIGHTS, PATH_SWING, PATH_RELIABILITY, SAC },
+    match:{ round:B.round, score:{me:B.myScore, opp:B.oppScore}, deck: deck ? {name:deck.name, cards:deck.cards} : null },
+    now:stateSnapshot(),
+    events:B.events,
+    readableLog:B.log.slice().reverse().map(e=>`R${e.round} ${e.text}`)
+  };
+}
+function logEvent(text){
+  B.log.unshift({round:B.round, text});
+  B.events.push({n:B.events.length+1, t:new Date().toISOString(), type:'text', data:{round:B.round, text}});
+  renderLog();
+}
 
 function newDuel(){
   Object.assign(B, {
@@ -866,8 +1011,9 @@ function newDuel(){
     myDpTotal:0, oppDpTotal:0, myHand:[], oppHand:[], phase:'deckselect',
     atkStep:'pick', myLockedAtk:null, mySupportChoiceId:'', oppSupportRevealed:null,
     selectedDeckId:null, deckUsedThisMatch:{},
-    log:[]
+    log:[], events:[]
   });
+  logData('duel.new');
   renderAll();
 }
 
@@ -919,6 +1065,7 @@ function beginTurnPhaseFor(player){
 function endTurnAndAdvance(){
   const next = B.turnPlayer==='me' ? 'opp' : 'me';
   beginTurnPhaseFor(next);
+  logData('turn.advance', {next});
   renderAll();
 }
 
@@ -1008,6 +1155,8 @@ function renderStatePanel(){
     if(B.myHand.length>=4){ alert('Hand is already at 4 cards.'); return; }
     B.myHand.push(withUid(card));
     if(deck){ B.deckUsedThisMatch[card.id] = (B.deckUsedThisMatch[card.id]||0) + 1; }
+    logData('hand.add', {who:'me', card:{id:card.id, name:card.name}});
+    logEvent(`You added ${card.name} to your hand (now: ${B.myHand.map(c=>c.name).join(', ')}).`);
     renderStatePanel();
     renderPhase();
   });
@@ -1015,14 +1164,16 @@ function renderStatePanel(){
   wireSearchBox('oppHandSearch', {}, (card)=>{
     if(B.oppHand.length>=4){ alert("Opponent's hand is already at 4 cards."); return; }
     B.oppHand.push(withUid(card));
+    logData('hand.add', {who:'opp', card:{id:card.id, name:card.name}});
+    logEvent(`Opponent's hand: ${B.oppHand.map(c=>c.name).join(', ')}.`);
     renderStatePanel();
     renderPhase();
   });
   document.querySelectorAll('#handChips [data-remove]').forEach(chip=>{
-    chip.addEventListener('click', ()=>{ removeFromHand(chip.dataset.remove); renderStatePanel(); renderPhase(); });
+    chip.addEventListener('click', ()=>{ const c = findInHand(B.myHand, chip.dataset.remove); removeFromHand(chip.dataset.remove); logData('hand.remove', {who:'me', card:c?{id:c.id, name:c.name}:null}); logEvent(`You removed ${c?c.name:'a card'} from your hand (now: ${B.myHand.map(x=>x.name).join(', ')||'empty'}).`); renderStatePanel(); renderPhase(); });
   });
   document.querySelectorAll('#oppHandChips [data-oppremove]').forEach(chip=>{
-    chip.addEventListener('click', ()=>{ removeFromOppHand(chip.dataset.oppremove); renderStatePanel(); renderPhase(); });
+    chip.addEventListener('click', ()=>{ const c = findInHand(B.oppHand, chip.dataset.oppremove); removeFromOppHand(chip.dataset.oppremove); logData('hand.remove', {who:'opp', card:c?{id:c.id, name:c.name}:null}); logEvent(`Opponent's hand: ${B.oppHand.map(x=>x.name).join(', ')||'empty'}.`); renderStatePanel(); renderPhase(); });
   });
 }
 
@@ -1122,7 +1273,8 @@ function applyEntranceSelection(card){
 function renderEntrancePhase(el){
   const isMe = B.turnPlayer==='me';
   const oppKnown = isMe ? B.oppActive : null;
-  const ranked = isMe ? rankEntranceCandidates(B.myHand, oppKnown, B.oppHp) : [];
+  const ranked = isMe ? rankEntranceCandidates(B.myHand, oppKnown, B.oppHp, B.myDpTotal) : [];
+  if(isMe) App._lastEntrance = ranked.map(r=>({uid:r.card._uid||r.card.id, id:r.card.id, name:r.card.name, heuristic:r.heuristic, score:r.matchupVal, key:r.matchupKey==null?null:Math.round(r.matchupKey), swing:r.matchupSwing, koMe:r.matchupKoMe, koOpp:r.matchupKoOpp, route:r.path}));
 
   el.innerHTML = `
     <h2>▸ PREP PHASE: ENTRANCE (${isMe?'YOUR':"OPPONENT'S"} TURN)</h2>
@@ -1180,10 +1332,14 @@ function rankSacrificeOptions(myActive, myDpTotal, hand, myHp){
   const results = [];
   const baselineEvo = myActive ? digivolveOptions(myActive, myDpTotal, hand) : [];
   const urgency = myActive ? urgencyMultiplier(myHp, myActive.hp) : 1;
+  // An Ultimate has nowhere left to digivolve, so banked DP is dead weight for it.
+  const canUseDp = !!myActive && myActive.lvl!=='U';
+  const pathNow = digivolvePath(myActive, hand, myDpTotal);
+  const baseline = replacementBaseline();
   // Standing still has a real cost when you're endangered AND have no path to
   // digivolve right now -- staying a fragile low-tier form while low on HP is
   // itself a risk, not a neutral default.
-  const standStillPenalty = (!baselineEvo.length && urgency>1) ? Math.round(-20*urgency) : 0;
+  const standStillPenalty = (canUseDp && !baselineEvo.length && urgency>1) ? Math.round(-20*urgency) : 0;
   results.push({
     id:'', name:'— sacrifice nothing —',
     note: baselineEvo.length ? `You already have ${baselineEvo.length} eligible digivolve target(s) at your current ${myDpTotal} DP.` :
@@ -1192,22 +1348,27 @@ function rankSacrificeOptions(myActive, myDpTotal, hand, myHp){
   });
 
   digimonCandidates.forEach(card=>{
-    const remainingHand = hand.filter(c=>String(c.id)!==String(card.id));
+    const uid = String(card._uid||card.id);
+    const remainingHand = hand.filter(c=>String(c._uid||c.id)!==uid);
     const newDp = myDpTotal + (card.pp||0);
     const beforeEvo = myActive ? digivolveOptions(myActive, myDpTotal, remainingHand) : [];
     const afterEvo = myActive ? digivolveOptions(myActive, newDp, remainingHand) : [];
     const newlyUnlocked = afterEvo.filter(e=>!beforeEvo.some(b=>String(b.id)===String(e.id)));
     const eff = effectQualityNote(card);
-    const avgAtk = Math.round((card.o+card.t+card.x)/3);
-    const opportunityCost = Math.round(card.hp/10 + avgAtk/5 + eff.score);
-    let score = (card.pp||0) - opportunityCost;
+    const value = cardValue(card);
+    const cost = Math.round(Math.max(0, value - baseline) * SAC.costWeight);
+    const pathAfter = digivolvePath(myActive, remainingHand, newDp);
+    const pathDelta = pathAfter.value - pathNow.value; // up when the DP closes the gap, down when this card IS the route up
+    let score = -cost + pathDelta;
     let note = `+${card.pp||0} DP (would bring your total to ${newDp}).`;
-    if(newlyUnlocked.length){
+    if(!canUseDp){
+      score -= 5;
+      note += ' Your active is already Ultimate, so banked DP has nowhere to go.';
+    } else if(newlyUnlocked.length){
       score += 200;
       note += ` Unlocks digivolving into ${newlyUnlocked.map(e=>e.name).join(', ')} THIS turn.`;
     } else {
-      const baseBonus = bankingBonus(myDpTotal, card.pp||0);
-      const bonus = Math.round(baseBonus * urgency);
+      const bonus = Math.round(bankingBonus(myDpTotal, card.pp||0) * urgency);
       if(bonus>0){
         score += bonus;
         note += urgency>1
@@ -1215,8 +1376,10 @@ function rankSacrificeOptions(myActive, myDpTotal, hand, myHp){
           : ` No immediate target, but banks progress toward a future digivolve (+${bonus} banking value).`;
       }
     }
+    if(pathNow.target && String(pathNow.target._uid||pathNow.target.id)===uid) note += ` This is your route up (${card.name}) — sacrificing it gives that up.`;
+    note += ` Replacing it with a typical draw costs about ${cost} (this card ~${value} vs ~${baseline}).`;
     if(eff.notes.length) note += ' Giving up: ' + eff.notes.join(' ');
-    results.push({ id:String(card._uid||card.id), name:card.name, note, score });
+    results.push({ id:uid, name:card.name, note, score });
   });
   return results.sort((a,b)=>b.score-a.score);
 }
@@ -1263,6 +1426,7 @@ function renderDpPhase(el){
       B.oppDpTotal = 0;
       document.getElementById('oppEvoInput').value = card.name;
       logEvent(`Opponent digivolved to ${card.name} (DP counter spent, reset to 0).`);
+      logData('dp.digivolve', {who:'opp', via:'dp', to:cardBrief(card)});
     });
     return;
   }
@@ -1283,6 +1447,7 @@ function renderDpPhase(el){
 
 function renderDpSacrificeStep(el, active, dpTotal){
   const sacRanked = rankSacrificeOptions(active, dpTotal, B.myHand, B.myHp);
+  App._lastSacrifice = sacRanked.map(r=>({id:r.id, name:r.name, score:r.score}));
   el.innerHTML = `
     <h2>▸ DP PHASE — STEP 1/3: SACRIFICE</h2>
     <div class="small-note">Pick a card to sacrifice, or skip. Either choice moves you straight to the next step.</div>
@@ -1297,9 +1462,12 @@ function renderDpSacrificeStep(el, active, dpTotal){
 
 function renderDpDigivolveStep(el, active, dpTotal){
   const evoOptions = digivolveOptions(active, dpTotal, B.myHand);
+  const adv = digivolveAdvice(active, B.myHp, B.oppActive, evoOptions.slice().sort((a,b)=>b.hp-a.hp)[0]);
+  App._lastDigivolveAdvice = adv;
   el.innerHTML = `
     <h2>▸ DP PHASE — STEP 2/3: DIGIVOLVE (banked DP: ${dpTotal})</h2>
     <div class="small-note">You can afford these. Pick one, or skip.</div>
+    ${adviceHtml(adv, 'hold (skip)')}
     ${evoOptions.map(c=>`
       <div class="suggestion-rank">
         <span><b>${c.name}</b> (${c.lvl}, needs ${c.dp} DP) — HP ${c.hp}, O ${c.o}/T ${c.t}/X ${c.x}</span>
@@ -1312,9 +1480,12 @@ function renderDpDigivolveStep(el, active, dpTotal){
 function renderDpSpeedDigivolveStep(el, active, dpTotal){
   const sc = findSpeedDigivolveCard(B.myHand);
   const opts = speedDigivolveOptions(active, B.myHand.filter(c=>c._uid!==sc._uid));
+  const adv = digivolveAdvice(active, B.myHp, B.oppActive, opts.slice().sort((a,b)=>b.hp-a.hp)[0]);
+  App._lastDigivolveAdvice = adv;
   el.innerHTML = `
     <h2>▸ DP PHASE — STEP 3/3: SPEED DIGIVOLVE (${sc.name} in hand — DP cost waived)</h2>
     <div class="small-note">Pick a target, or skip.</div>
+    ${adviceHtml(adv, 'hold (skip) and keep '+sc.name+' for when you need the refill')}
     ${opts.map(c=>`
       <div class="suggestion-rank">
         <span><b>${c.name}</b> (${c.lvl}) — HP ${c.hp}, O ${c.o}/T ${c.t}/X ${c.x}</span>
@@ -1339,6 +1510,7 @@ function renderAttackPhase(el){
   if(B.atkStep==='pick'){
     const grid = computeMatrix(B.myActive, B.oppActive, B.myHp, B.oppHp, [], 0, iAmTurnPlayer);
     const rec = maximin(grid);
+    App._lastAttackRec = {best:rec.best, worst:rec.bestVal, mean:Math.round(rec.bestMean), swing:rec.bestSwing, koMe:rec.bestKoMe, koOpp:rec.bestKoOpp, grid:gridBrief(grid)};
     const labels = {o:'Circle',t:'Triangle',x:'Cross'};
     let matrixHtml = '<table class="matrix"><tr><th>You \u2193 / Foe \u2192</th><th>Circle</th><th>Triangle</th><th>Cross</th></tr>';
     ['o','t','x'].forEach(a=>{
@@ -1393,13 +1565,14 @@ function renderAttackPhase(el){
     const redirectTag = oppTags.find(t=>t.type==='redirectOtherAttackValue');
     const redirectWarning = redirectTag ? `<div class="warn-box">${B.oppSupportRevealed.name} redirects your locked ${B.myLockedAtk.toUpperCase()} to use <b>${redirectTag.map[B.myLockedAtk].toUpperCase()}'s damage number</b> instead. Any support you pick that boosts/doubles "${B.myLockedAtk.toUpperCase()}" still applies — it checks which button you pressed, not which number came out — so it's scored against the redirected value below, not wasted.</div>` : '';
     const randomEv = getSelectedDeck() ? randomCardExpectedValue(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppTags, 0, iAmTurnPlayer) : null;
-    const combined = ranked.map(r=>({id:r.id, name:r.name, val:r.worst, swing:r.swing, koMe:r.koMe, koOpp:r.koOpp, partial:r.partial, note:null}));
+    const combined = ranked.map(r=>({id:r.id, name:r.name, val:r.worst, key:r.key, swing:r.swing, koMe:r.koMe, koOpp:r.koOpp, partial:r.partial, note:null}));
     if(randomEv){
-      combined.push({id:'__random__', name:'Play a random card from my deck', val:randomEv.ev, swing:randomEv.evSwing, note:`Expected value across the ${randomEv.poolSize} cards still unaccounted for in your tracked deck.${randomEv.koMeShare>0 ? ' In '+Math.round(randomEv.koMeShare*100)+'% of those draws the worst case gets you KO\u2019d.' : ''}`, approx:true});
+      combined.push({id:'__random__', name:'Play a random card from my deck', val:randomEv.ev, key:randomEv.key, swing:randomEv.evSwing, note:`Expected value across the ${randomEv.poolSize} cards still unaccounted for in your tracked deck.${randomEv.koMeShare>0 ? ' In '+Math.round(randomEv.koMeShare*100)+'% of those draws the worst case gets you KO\u2019d.' : ''}`, approx:true});
     } else {
       combined.push({id:'__random__', name:'Play a random card from my deck', val:null, note:"Unknown effect — can't be scored (select a deck to get a real estimate here)."});
     }
-    combined.sort((a,b)=>(b.val==null?-Infinity:b.val)-(a.val==null?-Infinity:a.val));
+    combined.sort((a,b)=>(b.key==null?-1e12:b.key)-(a.key==null?-1e12:a.key));
+    App._lastSupport = combined.map(r=>({id:r.id, name:r.name, score:r.val, swing:r.swing, koMe:r.koMe, koOpp:r.koOpp, partial:r.partial}));
     el.innerHTML = `
       <h2>▸ YOUR SUPPORT (REACTING)</h2>
       <div class="small-note">You locked ${B.myLockedAtk.toUpperCase()}. Opponent's support: <b>${B.oppSupportRevealed?B.oppSupportRevealed.name:'none'}</b>. Ranked by worst-case outcome against their 3 possible attacks:</div>
@@ -1418,13 +1591,14 @@ function renderAttackPhase(el){
     const ranked = rankSupportOptionsOpenInfo(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, B.myHand, B.oppHand, iAmTurnPlayer);
     const oppPossibleSets = [[]].concat(B.oppHand.map(c=>parseEffectTags(effectText(c), c)));
     const randomEv = getSelectedDeck() ? randomCardExpectedValue(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppPossibleSets, 0, iAmTurnPlayer) : null;
-    const combined = ranked.map(r=>({id:r.id, name:r.name, val:r.worst, swing:r.swing, koMe:r.koMe, koOpp:r.koOpp, partial:r.partial, note:null}));
+    const combined = ranked.map(r=>({id:r.id, name:r.name, val:r.worst, key:r.key, swing:r.swing, koMe:r.koMe, koOpp:r.koOpp, partial:r.partial, note:null}));
     if(randomEv){
-      combined.push({id:'__random__', name:'Play a random card from my deck', val:randomEv.ev, swing:randomEv.evSwing, note:`Expected value across the ${randomEv.poolSize} cards still unaccounted for in your tracked deck.${randomEv.koMeShare>0 ? ' In '+Math.round(randomEv.koMeShare*100)+'% of those draws the worst case gets you KO\u2019d.' : ''}`, approx:true});
+      combined.push({id:'__random__', name:'Play a random card from my deck', val:randomEv.ev, key:randomEv.key, swing:randomEv.evSwing, note:`Expected value across the ${randomEv.poolSize} cards still unaccounted for in your tracked deck.${randomEv.koMeShare>0 ? ' In '+Math.round(randomEv.koMeShare*100)+'% of those draws the worst case gets you KO\u2019d.' : ''}`, approx:true});
     } else {
       combined.push({id:'__random__', name:'Play a random card from my deck', val:null, note:"Unknown effect — can't be scored (select a deck to get a real estimate here)."});
     }
-    combined.sort((a,b)=>(b.val==null?-Infinity:b.val)-(a.val==null?-Infinity:a.val));
+    combined.sort((a,b)=>(b.key==null?-1e12:b.key)-(a.key==null?-1e12:a.key));
+    App._lastSupport = combined.map(r=>({id:r.id, name:r.name, score:r.val, swing:r.swing, koMe:r.koMe, koOpp:r.koOpp, partial:r.partial}));
     el.innerHTML = `
       <h2>▸ YOUR SUPPORT (COMMITTING BLIND)</h2>
       <div class="small-note">It's the opponent's turn, so you (non-turn player) must commit support first. You locked ${B.myLockedAtk.toUpperCase()}. Since their hand is visible, this is the true worst case across all 3 of their attacks and every support card actually in their hand (${B.oppHand.length} tracked) — not a guess.</div>
@@ -1486,10 +1660,12 @@ function renderAttackPhase(el){
     if(myWasRandom) wireSearchBox('myRandomReveal', {}, (card)=>{
       document.getElementById('myRandomReveal').value = card.name;
       App._myRandomRevealCard = card;
+      logData('random.revealed', {who:'me', card:{id:card.id, name:card.name}});
     });
     if(oppWasRandom) wireSearchBox('oppRandomReveal', {}, (card)=>{
       document.getElementById('oppRandomReveal').value = card.name;
       App._oppRandomRevealCard = card;
+      logData('random.revealed', {who:'opp', card:{id:card.id, name:card.name}});
     });
     return;
   }
@@ -1497,7 +1673,8 @@ function renderAttackPhase(el){
 
 function renderLog(){
   const el = document.getElementById('logList');
-  el.innerHTML = B.log.map(e=>`<div class="log-entry"><span class="tag">R${e.round}</span>${e.text}</div>`).join('') || '<div class="small-note">No events yet.</div>';
+  const tools = `<div style="margin-bottom:6px"><button class="btn small secondary" onclick="App.exportLog()">EXPORT LOG (JSON)</button> <button class="btn small secondary" onclick="App.copyLog()">COPY JSON</button> <span class="small-note">${B.events.length} events recorded</span></div>`;
+  el.innerHTML = tools + (B.log.map(e=>`<div class="log-entry"><span class="tag">R${e.round}</span>${e.text}</div>`).join('') || '<div class="small-note">No events yet.</div>');
 }
 
 function renderAll(){ renderHeader(); renderStatePanel(); renderPhase(); renderLog(); }
@@ -1505,7 +1682,28 @@ function renderAll(){ renderHeader(); renderStatePanel(); renderPhase(); renderL
 const App = {
   newDuel(){ if(confirm('Reset the whole duel (score, hand, DP totals)?')) newDuel(); },
 
+  exportLog(){
+    const text = JSON.stringify(buildLogExport(), null, 1);
+    const stamp = new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
+    const url = URL.createObjectURL(new Blob([text], {type:'application/json'}));
+    const a = document.createElement('a');
+    a.href = url; a.download = 'ddcb-battle-'+stamp+'.json';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 1000);
+  },
+  copyLog(){
+    const text = JSON.stringify(buildLogExport(), null, 1);
+    const fallback = ()=>{
+      const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select();
+      try{ document.execCommand('copy'); alert('Log copied.'); }catch(e){ alert('Copy failed — use EXPORT LOG (JSON) instead.'); }
+      ta.remove();
+    };
+    if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(()=>alert('Log copied.'), fallback); else fallback();
+  },
+
   confirmDraw(){
+    logEvent(`Hands confirmed. You: ${B.myHand.map(c=>c.name).join(', ')||'empty'}. Opponent: ${B.oppHand.map(c=>c.name).join(', ')||'empty'}.`);
+    logData('draw.confirmed');
     B.phase = activeFor(B.turnPlayer) ? 'dp' : 'entrance';
     if(B.phase==='dp') B.dpStep = 'sacrifice';
     renderAll();
@@ -1515,12 +1713,14 @@ const App = {
     B.selectedDeckId = i;
     B.deckUsedThisMatch = {};
     logEvent(`Using deck: ${DECKS[i].name} (${deckTotalCount(DECKS[i].cards)} cards).`);
+    logData('deck.selected', {slot:i, name:DECKS[i].name, cards:Object.keys(DECKS[i].cards).map(id=>{ const c = ALL_CARDS.find(x=>String(x.id)===String(id)); return {id:c?c.id:id, name:c?c.name:String(id), count:DECKS[i].cards[id]}; })});
     B.phase = 'kickoff';
     renderAll();
   },
 
   skipDeckSelection(){
     B.selectedDeckId = null;
+    logData('deck.none');
     B.phase = 'kickoff';
     renderAll();
   },
@@ -1528,6 +1728,7 @@ const App = {
   setKickoff(who){
     beginTurnPhaseFor(who);
     logEvent(who==='me' ? 'You go first this match.' : 'Opponent goes first this match.');
+    logData('kickoff', {first:who});
     renderAll();
   },
 
@@ -1549,6 +1750,7 @@ const App = {
       B.oppActive = picked.adjusted; B.oppHp = picked.adjusted.hp;
       logEvent(`Opponent enters with ${picked.adjusted.name}.`);
     }
+    logData('entrance', {who:B.turnPlayer, picked:cardBrief(picked.adjusted), recommended:(B.turnPlayer==='me'?App._lastEntrance:null), followed:(B.turnPlayer==='me' && App._lastEntrance && App._lastEntrance.length) ? String(App._lastEntrance[0].uid)===String(picked.raw._uid||picked.raw.id) : null});
     App._entrancePicked = null;
     B.phase = 'dp';
     B.dpStep = 'sacrifice';
@@ -1556,18 +1758,20 @@ const App = {
   },
 
   doSacrifice(id){
-    if(!id){ logEvent('You chose not to sacrifice this turn.'); B.dpStep = 'digivolve'; renderAll(); return; }
+    const adv = App._lastSacrifice || null;
+    if(!id){ logEvent('You chose not to sacrifice this turn.'); logData('dp.sacrifice', {who:'me', card:null, advisor:adv, followed:adv&&adv.length ? adv[0].id==='' : null}); B.dpStep = 'digivolve'; renderAll(); return; }
     const card = findInHand(B.myHand, id);
     if(!card) return;
     B.myDpTotal += (card.pp||0);
     removeFromHand(card._uid||card.id);
     logEvent(`You sacrificed ${card.name} for +${card.pp||0} DP (total ${B.myDpTotal}).`);
+    logData('dp.sacrifice', {who:'me', card:{id:card.id, name:card.name}, gain:card.pp||0, dpTotal:B.myDpTotal, advisor:adv, followed:adv&&adv.length ? String(adv[0].id)===String(card._uid||card.id) : null});
     B.dpStep = 'digivolve';
     renderAll();
   },
 
-  skipDigivolveStep(){ B.dpStep = 'speedDigivolve'; renderAll(); },
-  skipSpeedDigivolveStep(){ B.dpStep = 'done'; renderAll(); },
+  skipDigivolveStep(){ logData('dp.skip', {step:'digivolve', advice:App._lastDigivolveAdvice||null}); B.dpStep = 'speedDigivolve'; renderAll(); },
+  skipSpeedDigivolveStep(){ logData('dp.skip', {step:'speedDigivolve', advice:App._lastDigivolveAdvice||null}); B.dpStep = 'done'; renderAll(); },
 
   doOppSacrifice(){
     const selectId = document.getElementById('oppSacSelect').value;
@@ -1577,6 +1781,7 @@ const App = {
         B.oppDpTotal += (card.pp||0);
         removeFromOppHand(card._uid||card.id);
         logEvent(`Opponent sacrificed ${card.name} for +${card.pp||0} DP (total ${B.oppDpTotal}).`);
+        logData('dp.sacrifice', {who:'opp', card:{id:card.id, name:card.name}, gain:card.pp||0, dpTotal:B.oppDpTotal});
       }
       renderDpPhase(document.getElementById('phasePanel')); renderStatePanel(); renderHeader();
       return;
@@ -1589,6 +1794,7 @@ const App = {
     if(gain>0 || nameVal){
       B.oppDpTotal += gain;
       logEvent(`Opponent sacrificed ${label} for +${gain} DP (total ${B.oppDpTotal}).`);
+      logData('dp.sacrifice', {who:'opp', card:{name:label}, gain, dpTotal:B.oppDpTotal});
     }
     renderDpPhase(document.getElementById('phasePanel')); renderStatePanel(); renderHeader();
   },
@@ -1601,6 +1807,7 @@ const App = {
     B.oppHp = card.hp;
     B.oppDpTotal = 0;
     logEvent(`Opponent digivolved to ${card.name} (DP counter spent, reset to 0).`);
+    logData('dp.digivolve', {who:'opp', via:'dp', to:cardBrief(card)});
     renderAll();
   },
 
@@ -1608,10 +1815,12 @@ const App = {
     const card = findInHand(B.myHand, cardId);
     if(!card) return;
     removeFromHand(card._uid||card.id);
+    const from = cardBrief(B.myActive), hpBefore = B.myHp, dpBefore = B.myDpTotal;
     B.myActive = Object.assign({}, card);
     B.myHp = card.hp;
     B.myDpTotal = 0;
     logEvent(`You digivolved to ${card.name} (DP counter spent, reset to 0).`);
+    logData('dp.digivolve', {who:'me', via:'dp', from, to:cardBrief(card), hp:{before:hpBefore, after:B.myHp}, dp:{before:dpBefore, after:0}, advice:App._lastDigivolveAdvice||null});
     B.dpStep = 'speedDigivolve';
     renderAll();
   },
@@ -1622,14 +1831,17 @@ const App = {
     if(!target || !speedCard) return;
     removeFromHand(target._uid||target.id);
     removeFromHand(speedCard._uid||speedCard.id);
+    const from = cardBrief(B.myActive), hpBefore = B.myHp;
     B.myActive = Object.assign({}, target);
     B.myHp = target.hp;
     logEvent(`You Speed Digivolved to ${target.name} using ${speedCard.name} (DP cost waived, DP total unchanged).`);
+    logData('dp.digivolve', {who:'me', via:'speed', used:{id:speedCard.id, name:speedCard.name}, from, to:cardBrief(target), hp:{before:hpBefore, after:B.myHp}, dp:{before:B.myDpTotal, after:B.myDpTotal}, advice:App._lastDigivolveAdvice||null});
     B.dpStep = 'done';
     renderAll();
   },
 
   confirmDpDone(){
+    logData('dp.done', {battle:!!(B.myActive && B.oppActive)});
     if(!B.myActive || !B.oppActive){
       logEvent(`${B.turnPlayer==='me'?'You have':'Opponent has'} no opposing active yet — battle phase skipped.`);
       endTurnAndAdvance();
@@ -1641,6 +1853,9 @@ const App = {
 
   lockMyAttack(){
     B.myLockedAtk = document.getElementById('myAtkPick').value;
+    { const rec = App._lastAttackRec || null, nm = {o:'Circle', t:'Triangle', x:'Cross'};
+      logEvent(`You locked in ${nm[B.myLockedAtk]}${rec && rec.best!==B.myLockedAtk ? ' (solver suggested '+nm[rec.best]+')' : (rec ? ' (as the solver suggested)' : '')}.`);
+      logData('attack.locked', {attack:B.myLockedAtk, recommended:rec?rec.best:null, followed:rec?rec.best===B.myLockedAtk:null, solver:rec}); }
     if(B.turnPlayer==='me'){
       B.atkStep = 'awaitOppSupport';
     } else {
@@ -1656,6 +1871,7 @@ const App = {
     else if(selectId) card = findInHand(B.oppHand, selectId) || null;
     else if(App._pendingOppSupportCard) card = App._pendingOppSupportCard;
     B.oppSupportRevealed = card;
+    logData('attack.oppSupport', {timing:'before mine', card:card?{id:card.id, name:card.name, type:card.type}:null});
     if(card){
       logEvent(`Opponent's support: ${card.name}.`);
       if(selectId!=='__random__') removeFromOppHand(card._uid||card.id);
@@ -1670,6 +1886,8 @@ const App = {
     B.mySupportChoiceId = id || '';
     const name = id==='__random__' ? 'a random card from my deck' : (id ? (findInHand(B.myHand, id)||{}).name : 'no support');
     logEvent(`You committed support: ${name}.`);
+    { const rec = App._lastSupport || null, picked = (id && id!=='__random__') ? findInHand(B.myHand, id) : null;
+      logData('attack.mySupport', {choice: id==='__random__' ? 'random' : (picked ? {id:picked.id, name:picked.name} : null), ranking:rec, recommended:rec&&rec.length?{id:rec[0].id, name:rec[0].name}:null, followed:rec&&rec.length ? String(rec[0].id)===String(id||'') : null}); }
     if(B.turnPlayer==='me'){
       B.atkStep = 'resolve';
     } else {
@@ -1685,6 +1903,7 @@ const App = {
     else if(selectId) card = findInHand(B.oppHand, selectId) || null;
     else if(App._pendingOppSupportCard) card = App._pendingOppSupportCard;
     B.oppSupportRevealed = card;
+    logData('attack.oppSupport', {timing:'after mine', card:card?{id:card.id, name:card.name, type:card.type}:null});
     if(card){
       logEvent(`Opponent's support (reacting to yours): ${card.name}.`);
       if(selectId!=='__random__') removeFromOppHand(card._uid||card.id);
@@ -1697,6 +1916,7 @@ const App = {
 
   resolveTurn(){
     let oppAtk = document.getElementById('oppAtkFinal').value;
+    const oppAtkEntered = oppAtk;
     const iAmTurnPlayer = B.turnPlayer==='me';
 
     // If a random card's identity was revealed after the fact, use its real tags.
@@ -1711,6 +1931,11 @@ const App = {
     // Labels the button actually pressed alongside any redirect that changed
     // which NUMBER got used -- e.g. "O (redirected to T's value)" -- so the
     // log never silently shows "O" when the real damage came from elsewhere.
+    // Shows the attack that really got used: a support effect that forces or locks an attack
+    // (Darkrizamon's "Both players use O") changes it after you chose.
+    function usedLabel(chosen, used, isMine){
+      return used && used!==chosen ? chosen.toUpperCase()+' → '+used.toUpperCase()+' (forced by a support effect)' : attackLabel(chosen, isMine);
+    }
     function attackLabel(chosenAtk, isMine){
       const relevantTags = isMine ? oppSupportTags : mySupportTags; // redirects always come from the OTHER side's card
       const redirect = relevantTags.find(t=>t.type==='redirectOtherAttackValue');
@@ -1736,6 +1961,7 @@ const App = {
       }
     }
 
+    const hpBefore = {me:B.myHp, opp:B.oppHp};
     const cell = computeCell(B.myActive, B.oppActive, B.myHp, B.oppHp, B.myLockedAtk, oppAtk, mySupportTags, oppSupportTags, 0, iAmTurnPlayer);
     // computeCell resolves the whole bout (support HP effects first, then the strikes in
     // order), so real HP comes straight from it -- the same numbers the solver ranked on,
@@ -1747,7 +1973,21 @@ const App = {
     const mySupportLabel = mySupportCard ? ' + '+mySupportCard.name : (myRandomReveal ? ' + random card (revealed: '+myRandomReveal.name+')' : (B.mySupportChoiceId==='__random__' ? ' + random card (unknown effect)' : ''));
     const oppSupportLabel = B.oppSupportRevealed ? ' + '+(oppRandomReveal ? 'random card (revealed: '+oppRandomReveal.name+')' : B.oppSupportRevealed.name+(oppWasRandom?' (unknown effect)':'')) : '';
     const hpEffectNote = cell.hpNotes.length ? ' ('+cell.hpNotes.join(', ')+', applied and permanent)' : '';
-    logEvent(`You: ${attackLabel(B.myLockedAtk, true)} (${cell.myDmg} dmg)${mySupportLabel} vs Opponent: ${attackLabel(oppAtk, false)} (${cell.oppDmg} dmg)${oppSupportLabel}${unknownNote}${hpEffectNote}. HP now You ${B.myHp} / Opp ${B.oppHp}.`);
+    const boutText = `You: ${usedLabel(B.myLockedAtk, cell.myAtk, true)} (${cell.myDmg} dmg)${mySupportLabel} vs Opponent: ${usedLabel(oppAtk, cell.oppAtk, false)} (${cell.oppDmg} dmg)${oppSupportLabel}${unknownNote}${hpEffectNote}. HP now You ${B.myHp} / Opp ${B.oppHp}.`;
+    logEvent(boutText);
+    logData('bout.resolved', {
+      iAmTurnPlayer,
+      attacks:{ me:{chosen:B.myLockedAtk, used:cell.myAtk}, opp:{entered:oppAtkEntered, assumed:oppAtk, used:cell.oppAtk} },
+      support:{
+        me: mySupportCard ? {card:{id:mySupportCard.id, name:mySupportCard.name}, effects:tagsBrief(mySupportTags), unmodelled:mySupportTags.unmodelled||[]}
+            : (B.mySupportChoiceId==='__random__' ? {random:true, revealed:myRandomReveal?{id:myRandomReveal.id, name:myRandomReveal.name}:null, effects:tagsBrief(mySupportTags), unmodelled:mySupportTags.unmodelled||[]} : null),
+        opp: B.oppSupportRevealed ? {card:{id:B.oppSupportRevealed.id, name:B.oppSupportRevealed.name}, random:oppWasRandom, revealed:oppRandomReveal?{id:oppRandomReveal.id, name:oppRandomReveal.name}:null, effects:tagsBrief(oppSupportTags), unmodelled:oppSupportTags.unmodelled||[]} : null
+      },
+      result:{ myDmg:cell.myDmg, oppDmg:cell.oppDmg, koMe:cell.koMe, koOpp:cell.koOpp,
+               hp:{me:{before:hpBefore.me, after:B.myHp}, opp:{before:hpBefore.opp, after:B.oppHp}}, notes:cell.hpNotes,
+               effectsApplied:{me:cell.myTagsUsed, opp:cell.oppTagsUsed} },
+      text:boutText
+    });
     if((B.mySupportChoiceId==='__random__' && !myRandomReveal) || (oppWasRandom && !oppRandomReveal)){
       logEvent(`Note: a random/unknown card's identity is still unconfirmed — its effect wasn't modeled, so the damage above may not reflect what actually happened in-game.`);
     }
@@ -1756,14 +1996,17 @@ const App = {
     if(B.oppHp<=0 || B.myHp<=0){
       if(B.oppHp<=0 && B.myHp<=0){
         logEvent('Both Digimon KO\u2019d in the same bout — check your rulebook for the tie-break.');
+        logData('round.end', {winner:'both', round:B.round});
         B.myActive=null; B.myHp=0; B.oppActive=null; B.oppHp=0;
       } else if(B.oppHp<=0){
         B.myScore++;
         logEvent(`${B.oppActive.name} is KO'd! You win round ${B.round}. Your ${B.myActive.name} carries ${B.myHp} HP into the next round.`);
+        logData('round.end', {winner:'me', round:B.round, koed:B.oppActive.name, carries:{card:B.myActive.name, hp:B.myHp}});
         B.oppActive=null; B.oppHp=0;
       } else {
         B.oppScore++;
         logEvent(`${B.myActive.name} is KO'd! Opponent wins round ${B.round}. Their ${B.oppActive.name} carries ${B.oppHp} HP into the next round.`);
+        logData('round.end', {winner:'opp', round:B.round, koed:B.myActive.name, carries:{card:B.oppActive.name, hp:B.oppHp}});
         B.myActive=null; B.myHp=0;
       }
       B.round++;
@@ -2019,7 +2262,7 @@ Object.assign(App, {
     const owned = COLLECTION[cardId]||0;
     const current = deck.cards[cardId]||0;
     let next = current + delta;
-    next = Math.max(0, Math.min(owned, next));
+    next = Math.max(0, Math.min(owned, MAX_DECK_COPIES, next));
     if(next>0) deck.cards[cardId]=next; else delete deck.cards[cardId];
     await saveDecks();
     renderDeckTabs(); renderDeckEditor();
