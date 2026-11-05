@@ -941,6 +941,7 @@ const B = {
   deckUsedThisMatch:{}, // {cardId: count} -- cards drawn from deck into hand so far this match
   log:[],
   events:[], // the same story as data -- see logData()
+  matchWinner:null,
 };
 
 // ======================= STRUCTURED LOG + EXPORT =======================
@@ -1011,7 +1012,7 @@ function newDuel(){
     myDpTotal:0, oppDpTotal:0, myHand:[], oppHand:[], phase:'deckselect',
     atkStep:'pick', myLockedAtk:null, mySupportChoiceId:'', oppSupportRevealed:null,
     selectedDeckId:null, deckUsedThisMatch:{},
-    log:[], events:[]
+    log:[], events:[], matchWinner:null
   });
   logData('duel.new');
   renderAll();
@@ -1210,6 +1211,23 @@ function renderPhase(){
   if(B.phase==='entrance') return renderEntrancePhase(el);
   if(B.phase==='dp') return renderDpPhase(el);
   if(B.phase==='attack') return renderAttackPhase(el);
+  if(B.phase==='over') return renderMatchOverPhase(el);
+}
+
+function renderMatchOverPhase(el){
+  const won = B.matchWinner==='me';
+  el.innerHTML = `
+    <h2>▸ MATCH OVER — ${won ? 'YOU WIN' : 'YOU LOSE'} ${B.myScore}–${B.oppScore}</h2>
+    <div class="reason">${won ? 'Three KOs — the match is yours.' : 'The opponent reached three KOs.'} Export the log if you want it analysed, then start a new duel.</div>
+    <button class="btn" style="margin-top:12px" onclick="App.newDuel()">NEW DUEL</button>
+    <button class="btn secondary" style="margin-top:12px" onclick="App.exportLog()">EXPORT LOG (JSON)</button>
+  `;
+}
+
+// The search box clears itself after a pick, so say what was picked in plain text instead of
+// leaving an empty-looking field.
+function revealStatus(card){
+  return card ? `<span style="color:var(--nature)">✔ Applied: <b>${card.name}</b></span> — its effect is used when you resolve.` : 'Nothing entered yet — it will be treated as an unknown card with no effect.';
 }
 
 function renderDrawPhase(el){
@@ -1650,21 +1668,23 @@ function renderAttackPhase(el){
       ${myWasRandom ? `
         <label style="margin-top:12px">YOUR RANDOM CARD WAS REVEALED AS (if you know now)</label>
         <div class="search-box"><input id="myRandomReveal" placeholder="Card name, if revealed" autocomplete="off"><div class="suggest-list" id="myRandomReveal_list"></div></div>
+        <div class="small-note" id="myRandomRevealStatus" style="margin-top:4px">${revealStatus(App._myRandomRevealCard)}</div>
       ` : ''}
       ${oppWasRandom ? `
         <label style="margin-top:12px">OPPONENT'S RANDOM CARD WAS REVEALED AS (if you know now)</label>
         <div class="search-box"><input id="oppRandomReveal" placeholder="Card name, if revealed" autocomplete="off"><div class="suggest-list" id="oppRandomReveal_list"></div></div>
+        <div class="small-note" id="oppRandomRevealStatus" style="margin-top:4px">${revealStatus(App._oppRandomRevealCard)}</div>
       ` : ''}
       <button class="btn" style="margin-top:14px" onclick="App.resolveTurn()">RESOLVE TURN</button>
     `;
     if(myWasRandom) wireSearchBox('myRandomReveal', {}, (card)=>{
-      document.getElementById('myRandomReveal').value = card.name;
       App._myRandomRevealCard = card;
+      document.getElementById('myRandomRevealStatus').innerHTML = revealStatus(card);
       logData('random.revealed', {who:'me', card:{id:card.id, name:card.name}});
     });
     if(oppWasRandom) wireSearchBox('oppRandomReveal', {}, (card)=>{
-      document.getElementById('oppRandomReveal').value = card.name;
       App._oppRandomRevealCard = card;
+      document.getElementById('oppRandomRevealStatus').innerHTML = revealStatus(card);
       logData('random.revealed', {who:'opp', card:{id:card.id, name:card.name}});
     });
     return;
@@ -2008,6 +2028,16 @@ const App = {
         logEvent(`${B.myActive.name} is KO'd! Opponent wins round ${B.round}. Their ${B.oppActive.name} carries ${B.oppHp} HP into the next round.`);
         logData('round.end', {winner:'opp', round:B.round, koed:B.myActive.name, carries:{card:B.oppActive.name, hp:B.oppHp}});
         B.myActive=null; B.myHp=0;
+      }
+      // A match is won by the first player to cause 3 KOs -- stop there instead of starting another round.
+      if(B.myScore>=3 || B.oppScore>=3){
+        const won = B.myScore>=3;
+        B.phase = 'over'; B.matchWinner = won ? 'me' : 'opp';
+        logEvent(`MATCH OVER — ${won ? 'you win' : 'the opponent wins'} ${B.myScore}–${B.oppScore} after ${B.round} round${B.round===1?'':'s'}.`);
+        logData('match.end', {winner:B.matchWinner, score:{me:B.myScore, opp:B.oppScore}, rounds:B.round});
+        B.myLockedAtk=null; B.mySupportChoiceId=''; B.oppSupportRevealed=null;
+        renderAll();
+        return;
       }
       B.round++;
     }
